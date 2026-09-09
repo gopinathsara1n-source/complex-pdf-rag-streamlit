@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.DS_Store
+.streamlit/secrets.toml
+
+# Uploaded/generated user-document processing
+data/uploads/
+data/runtime/
+*.tmp
+
+# Local caches
+.cache/
+.pytest_cache/
