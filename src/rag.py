@@ -35,13 +35,11 @@ def _load_json(path):
     import json
     return json.loads(path.read_text(encoding="utf-8"))
 
-
 def _load_embedding_model():
     return SentenceTransformer(
         EMBEDDING_MODEL,
-        device="cuda" if __import__("torch").cuda.is_available() else "cpu",
+        device="cpu",
     )
-
 
 try:
     import streamlit as st
