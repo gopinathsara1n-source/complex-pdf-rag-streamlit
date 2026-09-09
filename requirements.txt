@@ -1,0 +1,11 @@
+streamlit>=1.45,<2
+docling>=2.30
+google-genai>=1.0
+sentence-transformers>=3.0
+faiss-cpu>=1.9
+pypdf>=5.0
+pillow>=10.0
+numpy>=1.26
+torch>=2.2
+tqdm>=4.66
+python-dotenv>=1.0

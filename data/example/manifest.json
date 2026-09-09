@@ -1,0 +1,10 @@
+{
+  "example_document": "1788150561832.pdf",
+  "pages": 462,
+  "chunks": 1536,
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dimension": 1024,
+  "faiss_index": "IndexFlatIP",
+  "similarity": "inner product on L2-normalized vectors (cosine-equivalent)",
+  "validated_source": "RAG_DRAFT_FINAL(2).ipynb"
+}
