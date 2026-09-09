@@ -9,7 +9,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 
 
 # ============================================================
-# TEXT HELPERS
+# TEXT UTILITIES
 # ============================================================
 
 def clean_text(text):
@@ -50,292 +50,342 @@ def split_sentences(text):
         text,
     )
 
-    sentences = [
-        clean_text(sentence)
-        for sentence in sentences
-        if clean_text(sentence)
+    return [
+        clean_text(x)
+        for x in sentences
+        if clean_text(x)
     ]
 
-    return sentences
-
 
 # ============================================================
-# DOCLING ITEM HELPERS
+# DOCLING EXPORT
 # ============================================================
 
-def unpack_item(item_data):
-    """
-    Docling versions may return:
-        item
-    or:
-        (item, level)
-
-    Normalize both forms.
-    """
-
-    if isinstance(item_data, tuple):
-
-        if len(item_data) >= 1:
-            return item_data[0]
-
-    return item_data
-
-
-def get_item_label(item):
+def export_docling_dict(doc):
     try:
-        label = getattr(item, "label", None)
+        data = doc.export_to_dict()
 
-        if label is not None:
-            return str(label).lower()
+        if isinstance(data, dict):
+            return data
 
     except Exception:
         pass
 
-    try:
-        if hasattr(item, "export_to_dict"):
-
-            data = item.export_to_dict()
-
-            if isinstance(data, dict):
-
-                label = (
-                    data.get("label")
-                    or data.get("type")
-                    or data.get("kind")
-                    or ""
-                )
-
-                return str(label).lower()
-
-    except Exception:
-        pass
-
-    return ""
+    return {}
 
 
-def get_page(item):
-    try:
+def build_reference_lookup(document_dict):
+    """
+    Build a lookup such as:
 
-        prov = getattr(
-            item,
-            "prov",
-            None,
+        #/texts/123  -> text object
+        #/tables/10  -> table object
+        #/pictures/4 -> picture object
+        #/groups/2   -> group object
+    """
+
+    lookup = {}
+
+    if not isinstance(document_dict, dict):
+        return lookup
+
+    for collection_name in (
+        "texts",
+        "tables",
+        "pictures",
+        "groups",
+        "key_value_items",
+        "form_items",
+    ):
+
+        collection = document_dict.get(
+            collection_name,
+            [],
         )
 
-        if prov:
+        if not isinstance(collection, list):
+            continue
 
-            first = prov[0]
+        for item in collection:
 
-            page_no = getattr(
-                first,
-                "page_no",
-                None,
+            if not isinstance(item, dict):
+                continue
+
+            ref = item.get("self_ref")
+
+            if ref:
+                lookup[ref] = item
+
+    return lookup
+
+
+# ============================================================
+# REFERENCE TRAVERSAL
+# ============================================================
+
+def resolve_ref(ref, lookup):
+    if not isinstance(ref, dict):
+        return None
+
+    target = ref.get("$ref")
+
+    if not target:
+        return None
+
+    return lookup.get(target)
+
+
+def traverse_children(
+    children,
+    lookup,
+    visited=None,
+):
+    """
+    Recursively follow Docling body/group references
+    while preserving document order.
+    """
+
+    if visited is None:
+        visited = set()
+
+    if not isinstance(children, list):
+        return
+
+    for child_ref in children:
+
+        if not isinstance(
+            child_ref,
+            dict,
+        ):
+            continue
+
+        ref = child_ref.get("$ref")
+
+        if not ref:
+            continue
+
+        if ref in visited:
+            continue
+
+        item = lookup.get(ref)
+
+        if item is None:
+            continue
+
+        label = str(
+            item.get(
+                "label",
+                "",
+            )
+        ).lower()
+
+        # ----------------------------------------------------
+        # GROUP
+        # ----------------------------------------------------
+
+        if ref.startswith("#/groups/"):
+
+            visited.add(ref)
+
+            group_children = item.get(
+                "children",
+                [],
             )
 
-            if page_no is not None:
-                return int(page_no)
+            yield from traverse_children(
+                group_children,
+                lookup,
+                visited,
+            )
 
-            if isinstance(first, dict):
+        # ----------------------------------------------------
+        # TEXT / TABLE / PICTURE
+        # ----------------------------------------------------
 
-                page_no = first.get(
-                    "page_no"
-                )
+        else:
 
-                if page_no is not None:
-                    return int(page_no)
+            visited.add(ref)
 
-    except Exception:
-        pass
-
-    return None
+            yield item
 
 
-def get_self_ref(item):
-    try:
+# ============================================================
+# PAGE EXTRACTION
+# ============================================================
 
-        ref = getattr(
-            item,
-            "self_ref",
-            None,
+def get_page_from_dict(item):
+
+    if not isinstance(
+        item,
+        dict,
+    ):
+        return None
+
+    prov = item.get(
+        "prov",
+        [],
+    )
+
+    if not isinstance(
+        prov,
+        list,
+    ):
+        return None
+
+    for provenance in prov:
+
+        if not isinstance(
+            provenance,
+            dict,
+        ):
+            continue
+
+        page_no = provenance.get(
+            "page_no"
         )
 
-        if ref:
-            return ref
+        if page_no is not None:
 
-    except Exception:
-        pass
+            try:
+                return int(page_no)
 
-    try:
-
-        if hasattr(
-            item,
-            "export_to_dict",
-        ):
-
-            data = item.export_to_dict()
-
-            if isinstance(data, dict):
-
-                ref = data.get(
-                    "self_ref"
-                )
-
-                if ref:
-                    return ref
-
-    except Exception:
-        pass
+            except Exception:
+                pass
 
     return None
 
 
-def get_text(item):
-    """
-    Extract textual content from a Docling item.
+# ============================================================
+# TEXT EXTRACTION
+# ============================================================
 
-    Uses multiple strategies because different
-    Docling item classes expose their text differently.
-    """
+def get_text_from_dict(item):
 
-    # --------------------------------------------------------
-    # Direct attributes
-    # --------------------------------------------------------
+    if not isinstance(
+        item,
+        dict,
+    ):
+        return ""
 
-    for attr in (
+    for key in (
         "text",
+        "orig",
         "content",
         "caption",
     ):
 
-        try:
-
-            value = getattr(
-                item,
-                attr,
-                None,
-            )
-
-            if value:
-
-                cleaned = clean_text(
-                    value
-                )
-
-                if cleaned:
-                    return cleaned
-
-        except Exception:
-            pass
-
-    # --------------------------------------------------------
-    # Docling text representation
-    # --------------------------------------------------------
-
-    try:
-
-        if hasattr(
-            item,
-            "text",
-        ):
-
-            value = item.text
-
-            if value:
-
-                cleaned = clean_text(
-                    value
-                )
-
-                if cleaned:
-                    return cleaned
-
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # Exported dictionary
-    # --------------------------------------------------------
-
-    try:
-
-        if hasattr(
-            item,
-            "export_to_dict",
-        ):
-
-            data = item.export_to_dict()
-
-            if isinstance(
-                data,
-                dict,
-            ):
-
-                for key in (
-                    "text",
-                    "content",
-                    "caption",
-                ):
-
-                    value = data.get(
-                        key
-                    )
-
-                    if value:
-
-                        cleaned = clean_text(
-                            value
-                        )
-
-                        if cleaned:
-                            return cleaned
-
-    except Exception:
-        pass
-
-    return ""
-
-
-# ============================================================
-# TABLE HELPERS
-# ============================================================
-
-def extract_table_cells(table_dict):
-
-    cells = []
-
-    if not isinstance(
-        table_dict,
-        dict,
-    ):
-        return cells
-
-    for key in (
-        "data",
-        "table_cells",
-        "cells",
-    ):
-
-        value = table_dict.get(
+        value = item.get(
             key
         )
 
         if isinstance(
             value,
-            list,
+            str,
         ):
 
-            cells.extend(value)
+            value = clean_text(
+                value
+            )
 
-    return cells
+            if value:
+                return value
+
+    # --------------------------------------------------------
+    # Captions may be a list
+    # --------------------------------------------------------
+
+    captions = item.get(
+        "captions"
+    )
+
+    if isinstance(
+        captions,
+        list,
+    ):
+
+        parts = []
+
+        for caption in captions:
+
+            if isinstance(
+                caption,
+                dict,
+            ):
+
+                value = (
+                    caption.get("text")
+                    or caption.get("orig")
+                    or caption.get("content")
+                    or ""
+                )
+
+                value = clean_text(
+                    value
+                )
+
+                if value:
+                    parts.append(
+                        value
+                    )
+
+        if parts:
+            return " ".join(parts)
+
+    return ""
 
 
-def table_to_text(table_dict):
+# ============================================================
+# TABLE EXTRACTION
+# ============================================================
+
+def extract_table_cells(table_dict):
 
     if not isinstance(
         table_dict,
         dict,
     ):
-        return ""
+        return []
+
+    data = table_dict.get(
+        "data"
+    )
+
+    if isinstance(
+        data,
+        dict,
+    ):
+
+        cells = data.get(
+            "table_cells"
+        )
+
+        if isinstance(
+            cells,
+            list,
+        ):
+            return cells
+
+    # Compatibility with older structures
+
+    for key in (
+        "table_cells",
+        "cells",
+    ):
+
+        cells = table_dict.get(
+            key
+        )
+
+        if isinstance(
+            cells,
+            list,
+        ):
+            return cells
+
+    return []
+
+
+def table_to_text(table_dict):
 
     cells = extract_table_cells(
         table_dict
@@ -354,20 +404,24 @@ def table_to_text(table_dict):
         ):
             continue
 
-        text = (
-            cell.get("text")
-            or cell.get("content")
-            or cell.get("value")
-            or ""
+        text = clean_text(
+            cell.get(
+                "text",
+                ""
+            )
         )
 
-        text = clean_text(
-            text
-        )
+        if not text:
+            continue
 
         row_index = cell.get(
-            "row_index"
+            "start_row_offset_idx"
         )
+
+        if row_index is None:
+            row_index = cell.get(
+                "row_index"
+            )
 
         if row_index is None:
             row_index = cell.get(
@@ -375,8 +429,13 @@ def table_to_text(table_dict):
             )
 
         col_index = cell.get(
-            "col_index"
+            "start_col_offset_idx"
         )
+
+        if col_index is None:
+            col_index = cell.get(
+                "col_index"
+            )
 
         if col_index is None:
             col_index = cell.get(
@@ -429,108 +488,161 @@ def table_to_text(table_dict):
 
 
 # ============================================================
-# DOCX/DOCLING EXPORT LOOKUP
+# CANONICAL DOCUMENT
 # ============================================================
 
-def build_item_lookup(doc):
+def build_canonical_document(
+    document_dict,
+):
 
-    lookup = {}
-
-    try:
-
-        document_dict = (
-            doc.export_to_dict()
-        )
-
-    except Exception:
-
-        document_dict = {}
+    canonical = []
 
     if not isinstance(
         document_dict,
         dict,
     ):
-        return lookup
+        return canonical
 
-    for key in (
-        "texts",
-        "tables",
-        "pictures",
-        "groups",
+    lookup = build_reference_lookup(
+        document_dict
+    )
+
+    body = document_dict.get(
         "body",
-    ):
+        {}
+    )
 
-        items = document_dict.get(
-            key,
-            []
-        )
+    if not isinstance(
+        body,
+        dict,
+    ):
+        return canonical
+
+    body_children = body.get(
+        "children",
+        []
+    )
+
+    visited = set()
+
+    ordered_items = traverse_children(
+        body_children,
+        lookup,
+        visited,
+    )
+
+    element_id = 0
+
+    current_section = None
+
+    for item in ordered_items:
 
         if not isinstance(
-            items,
-            list,
+            item,
+            dict,
         ):
             continue
 
-        for item in items:
-
-            if not isinstance(
-                item,
-                dict,
-            ):
-                continue
-
-            ref = item.get(
-                "self_ref"
+        label = str(
+            item.get(
+                "label",
+                "",
             )
+        ).lower()
 
-            if ref:
-                lookup[ref] = item
-
-    return lookup
-
-
-# ============================================================
-# ITERATE DOCLING ITEMS
-# ============================================================
-
-def iterate_doc_items(doc):
-
-    """
-    Compatibility wrapper for different Docling versions.
-
-    Some versions return:
-        item
-
-    while others return:
-        (item, level)
-    """
-
-    try:
-
-        iterator = doc.iterate_items()
-
-    except Exception:
-
-        return
-
-    for item_data in iterator:
-
-        item = unpack_item(
-            item_data
+        page = get_page_from_dict(
+            item
         )
 
-        if item is None:
+        # ====================================================
+        # TABLE
+        # ====================================================
+
+        if label == "table" or "table" in label:
+
+            text = table_to_text(
+                item
+            )
+
+            element_type = "table"
+
+        # ====================================================
+        # PICTURE
+        # ====================================================
+
+        elif (
+            label == "picture"
+            or "picture" in label
+            or "image" in label
+        ):
+
+            text = get_text_from_dict(
+                item
+            )
+
+            element_type = "visual"
+
+        # ====================================================
+        # TEXT
+        # ====================================================
+
+        else:
+
+            text = get_text_from_dict(
+                item
+            )
+
+            element_type = "text"
+
+        text = clean_text(
+            text
+        )
+
+        if not text:
             continue
 
-        yield item
+        # ====================================================
+        # SECTION HEADER
+        # ====================================================
+
+        if label in (
+            "section_header",
+            "title",
+            "heading",
+        ):
+
+            current_section = text
+
+        canonical.append(
+            {
+                "element_id":
+                    element_id,
+
+                "type":
+                    element_type,
+
+                "page":
+                    page,
+
+                "section":
+                    current_section,
+
+                "text":
+                    text,
+            }
+        )
+
+        element_id += 1
+
+    return canonical
 
 
 # ============================================================
-# VISUAL EXTRACTION
+# VISUAL MANIFEST
 # ============================================================
 
 def extract_visual_manifest(
-    doc,
+    document_dict,
     image_dir,
 ):
 
@@ -541,67 +653,53 @@ def extract_visual_manifest(
 
     manifest = []
 
-    visual_index = 0
+    pictures = document_dict.get(
+        "pictures",
+        [],
+    )
 
-    for item in iterate_doc_items(
-        doc
+    if not isinstance(
+        pictures,
+        list,
+    ):
+        return manifest
+
+    for index, picture in enumerate(
+        pictures,
+        start=1,
     ):
 
-        label = get_item_label(
-            item
-        )
-
-        if (
-            "picture" not in label
-            and "image" not in label
+        if not isinstance(
+            picture,
+            dict,
         ):
             continue
 
-        visual_index += 1
+        page = get_page_from_dict(
+            picture
+        )
 
-        page = get_page(
-            item
+        caption = get_text_from_dict(
+            picture
         )
 
         image_path = None
 
-        try:
-
-            image = item.get_image(
-                doc
-            )
-
-            if image is not None:
-
-                image_path = (
-                    image_dir
-                    / f"visual_{visual_index:04d}.png"
-                )
-
-                image.save(
-                    image_path
-                )
-
-        except Exception:
-
-            image_path = None
-
-        caption = get_text(
-            item
-        )
+        # ----------------------------------------------------
+        # We do not need to decode the embedded image here.
+        # Docling's main extraction remains responsible for it.
+        # ----------------------------------------------------
 
         manifest.append(
             {
                 "visual_id":
-                    f"visual_{visual_index:04d}",
+                    f"visual_{index:04d}",
 
                 "page":
                     page,
 
                 "image_path":
-                    str(image_path)
-                    if image_path
-                    else None,
+                    None,
 
                 "caption":
                     caption,
@@ -609,131 +707,6 @@ def extract_visual_manifest(
         )
 
     return manifest
-
-
-# ============================================================
-# CANONICAL DOCUMENT
-# ============================================================
-
-def build_canonical_document(
-    doc,
-):
-
-    canonical = []
-
-    item_lookup = build_item_lookup(
-        doc
-    )
-
-    index = 0
-
-    for item in iterate_doc_items(
-        doc
-    ):
-
-        label = get_item_label(
-            item
-        )
-
-        page = get_page(
-            item
-        )
-
-        element_type = "text"
-
-        # ----------------------------------------------------
-        # TABLE
-        # ----------------------------------------------------
-
-        if "table" in label:
-
-            element_type = "table"
-
-            text = ""
-
-            try:
-
-                ref = get_self_ref(
-                    item
-                )
-
-                table_dict = (
-                    item_lookup.get(
-                        ref
-                    )
-                )
-
-                if table_dict is None:
-
-                    try:
-
-                        table_dict = (
-                            item.export_to_dict()
-                        )
-
-                    except Exception:
-
-                        table_dict = None
-
-                text = table_to_text(
-                    table_dict
-                )
-
-            except Exception:
-
-                text = ""
-
-        # ----------------------------------------------------
-        # PICTURE / IMAGE
-        # ----------------------------------------------------
-
-        elif (
-            "picture" in label
-            or "image" in label
-        ):
-
-            element_type = "visual"
-
-            text = get_text(
-                item
-            )
-
-        # ----------------------------------------------------
-        # NORMAL TEXT
-        # ----------------------------------------------------
-
-        else:
-
-            text = get_text(
-                item
-            )
-
-        text = clean_text(
-            text
-        )
-
-        if not text:
-            continue
-
-        canonical.append(
-            {
-                "element_id":
-                    index,
-
-                "type":
-                    element_type,
-
-                "page":
-                    page,
-
-                "text":
-                    text,
-            }
-        )
-
-        index += 1
-
-    return canonical
 
 
 # ============================================================
@@ -759,12 +732,12 @@ def build_chunks(
         if not current_parts:
             return
 
-        text = "\n\n".join(
+        content = "\n\n".join(
             part["text"]
             for part in current_parts
         ).strip()
 
-        if not text:
+        if not content:
 
             current_parts = []
             current_length = 0
@@ -773,7 +746,8 @@ def build_chunks(
 
         pages = []
         element_ids = []
-        types = []
+        element_types = []
+        sections = []
 
         for part in current_parts:
 
@@ -804,17 +778,26 @@ def build_chunks(
             )
 
             if element_type:
-                types.append(
+                element_types.append(
                     element_type
                 )
 
-        first_page = (
+            section = metadata.get(
+                "section"
+            )
+
+            if section:
+                sections.append(
+                    section
+                )
+
+        page_start = (
             min(pages)
             if pages
             else None
         )
 
-        last_page = (
+        page_end = (
             max(pages)
             if pages
             else None
@@ -822,43 +805,15 @@ def build_chunks(
 
         unique_types = list(
             dict.fromkeys(
-                types
+                element_types
             )
         )
 
-        has_table = (
-            "table"
-            in unique_types
+        section = (
+            sections[-1]
+            if sections
+            else None
         )
-
-        has_visual = (
-            "visual"
-            in unique_types
-        )
-
-        # ----------------------------------------------------
-        # SECTION
-        # ----------------------------------------------------
-
-        section = None
-
-        for part in current_parts:
-
-            part_section = (
-                part["metadata"].get(
-                    "section"
-                )
-            )
-
-            if part_section:
-
-                section = part_section
-
-                break
-
-        # ----------------------------------------------------
-        # COMPATIBLE CHUNK FORMAT
-        # ----------------------------------------------------
 
         chunks.append(
             {
@@ -866,13 +821,13 @@ def build_chunks(
                     len(chunks),
 
                 "content":
-                    text,
+                    content,
 
                 "page_start":
-                    first_page,
+                    page_start,
 
                 "page_end":
-                    last_page,
+                    page_end,
 
                 "section":
                     section,
@@ -884,10 +839,12 @@ def build_chunks(
                     unique_types,
 
                 "has_table":
-                    has_table,
+                    "table"
+                    in unique_types,
 
                 "has_visual":
-                    has_visual,
+                    "visual"
+                    in unique_types,
             }
         )
 
@@ -898,7 +855,7 @@ def build_chunks(
         if overlap_chars > 0:
 
             overlap_text = (
-                text[
+                content[
                     -overlap_chars:
                 ]
             )
@@ -911,7 +868,7 @@ def build_chunks(
                     "metadata":
                         {
                             "page":
-                                last_page,
+                                page_end,
 
                             "element_id":
                                 None,
@@ -935,7 +892,7 @@ def build_chunks(
             current_length = 0
 
     # ========================================================
-    # PROCESS CANONICAL ELEMENTS
+    # ELEMENT LOOP
     # ========================================================
 
     for element in canonical:
@@ -943,12 +900,14 @@ def build_chunks(
         text = clean_text(
             element.get(
                 "text",
-                "",
+                ""
             )
         )
 
         if not text:
             continue
+
+        # Do not index isolated page numbers.
 
         if is_probable_page_number(
             text
@@ -957,7 +916,7 @@ def build_chunks(
 
         element_type = element.get(
             "type",
-            "text",
+            "text"
         )
 
         page = element.get(
@@ -981,11 +940,11 @@ def build_chunks(
                 text
             ]
 
-        # ====================================================
-        # LONG SENTENCE
-        # ====================================================
-
         for sentence in sentences:
+
+            # =================================================
+            # LONG SENTENCE
+            # =================================================
 
             if len(sentence) > max_chars:
 
@@ -1130,7 +1089,7 @@ def build_chunks(
             )
 
     # ========================================================
-    # FINAL CHUNK
+    # FINAL FLUSH
     # ========================================================
 
     if current_parts:
@@ -1180,18 +1139,19 @@ def process_pdf(
         )
 
     # ========================================================
-    # DOCLING PIPELINE
+    # DOCLING CONFIGURATION
     # ========================================================
 
     pipeline_options = (
         PdfPipelineOptions()
     )
 
-    # OCR disabled to avoid RapidOCR attempting
-    # to write its model into read-only site-packages
-    # on Streamlit Community Cloud.
+    # OCR disabled because RapidOCR currently attempts
+    # to write model files into the read-only Python
+    # site-packages environment on Streamlit Cloud.
     #
-    # Digital PDFs will still use their embedded text.
+    # Embedded digital-PDF text is still extracted.
+
     pipeline_options.do_ocr = False
 
     pipeline_options.do_table_structure = True
@@ -1218,7 +1178,7 @@ def process_pdf(
         )
 
     # ========================================================
-    # CONVERT PDF
+    # PDF CONVERSION
     # ========================================================
 
     result = converter.convert(
@@ -1235,22 +1195,67 @@ def process_pdf(
         )
 
     # ========================================================
-    # VISUALS
+    # EXPORT DOCLING DOCUMENT
     # ========================================================
 
-    visual_manifest = (
-        extract_visual_manifest(
-            doc,
-            image_dir,
+    document_dict = export_docling_dict(
+        doc
+    )
+
+    if not document_dict:
+
+        raise ValueError(
+            "Docling conversion completed, "
+            "but export_to_dict() returned no document data."
+        )
+
+    # ========================================================
+    # RAW EXTRACTION COUNTS
+    # ========================================================
+
+    raw_text_count = len(
+        document_dict.get(
+            "texts",
+            []
+        )
+    )
+
+    raw_table_count = len(
+        document_dict.get(
+            "tables",
+            []
+        )
+    )
+
+    raw_picture_count = len(
+        document_dict.get(
+            "pictures",
+            []
         )
     )
 
     if progress_callback:
 
         progress_callback(
-            f"✓ Extracted {len(visual_manifest)} visual elements",
-            0.55,
+            (
+                "✓ Docling found "
+                f"{raw_text_count:,} text elements, "
+                f"{raw_table_count:,} tables and "
+                f"{raw_picture_count:,} visuals"
+            ),
+            0.50,
         )
+
+    # ========================================================
+    # VISUAL MANIFEST
+    # ========================================================
+
+    visual_manifest = (
+        extract_visual_manifest(
+            document_dict,
+            image_dir,
+        )
+    )
 
     try:
 
@@ -1270,20 +1275,30 @@ def process_pdf(
     except Exception:
         pass
 
+    if progress_callback:
+
+        progress_callback(
+            f"✓ Extracted {len(visual_manifest)} visual elements",
+            0.55,
+        )
+
     # ========================================================
     # CANONICAL DOCUMENT
     # ========================================================
 
     canonical_elements = (
         build_canonical_document(
-            doc
+            document_dict
         )
     )
 
     if progress_callback:
 
         progress_callback(
-            f"✓ Built canonical document with {len(canonical_elements)} elements",
+            (
+                "✓ Built canonical document with "
+                f"{len(canonical_elements):,} elements"
+            ),
             0.65,
         )
 
@@ -1298,7 +1313,10 @@ def process_pdf(
     if progress_callback:
 
         progress_callback(
-            f"✓ Created {len(chunks)} structure-aware chunks",
+            (
+                "✓ Created "
+                f"{len(chunks):,} structure-aware chunks"
+            ),
             0.80,
         )
 
@@ -1343,17 +1361,32 @@ def process_pdf(
         "visual_elements":
             visual_count,
 
+        "raw_text_elements":
+            raw_text_count,
+
+        "raw_table_elements":
+            raw_table_count,
+
+        "raw_visual_elements":
+            raw_picture_count,
+
         "total_chunks":
             len(chunks),
 
         "pages_detected":
-            len(set(pages)) if pages else 0,
+            len(set(pages))
+            if pages
+            else 0,
 
         "first_page":
-            min(pages) if pages else None,
+            min(pages)
+            if pages
+            else None,
 
         "last_page":
-            max(pages) if pages else None,
+            max(pages)
+            if pages
+            else None,
     }
 
     # ========================================================
@@ -1376,6 +1409,11 @@ def process_pdf(
     chunks_path = (
         work_dir
         / "chunks.json"
+    )
+
+    docling_path = (
+        work_dir
+        / "docling_document.json"
     )
 
     try:
@@ -1406,18 +1444,46 @@ def process_pdf(
                 indent=2,
             )
 
+        # Save raw Docling structure for debugging.
+        #
+        # This is intentionally useful during deployment.
+        # It can be removed later if file size becomes an issue.
+
+        with open(
+            docling_path,
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            json.dump(
+                document_dict,
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
     except Exception:
         pass
 
     # ========================================================
-    # SAFETY CHECK
+    # FINAL VALIDATION
     # ========================================================
+
+    if not canonical_elements:
+
+        raise ValueError(
+            "Docling extracted the PDF, "
+            "but no canonical elements were produced. "
+            f"Raw text elements: {raw_text_count}. "
+            f"Raw tables: {raw_table_count}. "
+            f"Raw pictures: {raw_picture_count}."
+        )
 
     if not chunks:
 
         raise ValueError(
-            "Docling extracted the PDF, "
-            "but no retrieval chunks were produced. "
+            "Canonical elements were produced, "
+            "but no retrieval chunks were created. "
             f"Canonical elements: {len(canonical_elements)}. "
             f"Statistics: {statistics}"
         )
