@@ -801,11 +801,10 @@ def process_pdf(
     # and automatically download required
     # models.
     pipeline_options = PdfPipelineOptions()
-
+    
+    pipeline_options.do_ocr = False
     pipeline_options.do_table_structure = True
-
     pipeline_options.generate_picture_images = True
-
     pipeline_options.do_picture_description = False
 
     converter = DocumentConverter(
