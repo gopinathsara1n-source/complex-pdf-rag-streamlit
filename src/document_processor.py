@@ -3,9 +3,18 @@ import json
 import re
 from collections import defaultdict
 
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import (
+    DocumentConverter,
+    PdfFormatOption,
+)
+
+from docling.datamodel.base_models import (
+    InputFormat,
+)
+
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions,
+)
 
 
 # ============================================================
@@ -13,34 +22,63 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 # ============================================================
 
 def clean_text(text):
+
     if text is None:
         return ""
 
     text = str(text)
-    text = text.replace("\x00", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    text = text.replace(
+        "\x00",
+        " ",
+    )
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text,
+    )
 
     return text.strip()
 
 
 def is_probable_page_number(text):
-    text = clean_text(text)
+
+    text = clean_text(
+        text
+    )
 
     if not text:
         return False
 
-    if re.fullmatch(r"\d{1,4}", text):
+    if re.fullmatch(
+        r"\d{1,4}",
+        text,
+    ):
+
         return True
 
-    if re.fullmatch(r"(page\s*)?\d{1,4}", text.lower()):
+    if re.fullmatch(
+        r"(page\s*)?\d{1,4}",
+        text.lower(),
+    ):
+
         return True
 
     return False
 
 
 def split_sentences(text):
-    text = clean_text(text)
+
+    text = clean_text(
+        text
+    )
 
     if not text:
         return []
@@ -62,10 +100,16 @@ def split_sentences(text):
 # ============================================================
 
 def export_docling_dict(doc):
+
     try:
+
         data = doc.export_to_dict()
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict,
+        ):
+
             return data
 
     except Exception:
@@ -74,19 +118,21 @@ def export_docling_dict(doc):
     return {}
 
 
-def build_reference_lookup(document_dict):
-    """
-    Build a lookup such as:
+# ============================================================
+# REFERENCE LOOKUP
+# ============================================================
 
-        #/texts/123  -> text object
-        #/tables/10  -> table object
-        #/pictures/4 -> picture object
-        #/groups/2   -> group object
-    """
+def build_reference_lookup(
+    document_dict,
+):
 
     lookup = {}
 
-    if not isinstance(document_dict, dict):
+    if not isinstance(
+        document_dict,
+        dict,
+    ):
+
         return lookup
 
     for collection_name in (
@@ -103,17 +149,28 @@ def build_reference_lookup(document_dict):
             [],
         )
 
-        if not isinstance(collection, list):
+        if not isinstance(
+            collection,
+            list,
+        ):
+
             continue
 
         for item in collection:
 
-            if not isinstance(item, dict):
+            if not isinstance(
+                item,
+                dict,
+            ):
+
                 continue
 
-            ref = item.get("self_ref")
+            ref = item.get(
+                "self_ref"
+            )
 
             if ref:
+
                 lookup[ref] = item
 
     return lookup
@@ -123,32 +180,20 @@ def build_reference_lookup(document_dict):
 # REFERENCE TRAVERSAL
 # ============================================================
 
-def resolve_ref(ref, lookup):
-    if not isinstance(ref, dict):
-        return None
-
-    target = ref.get("$ref")
-
-    if not target:
-        return None
-
-    return lookup.get(target)
-
-
 def traverse_children(
     children,
     lookup,
     visited=None,
 ):
-    """
-    Recursively follow Docling body/group references
-    while preserving document order.
-    """
 
     if visited is None:
         visited = set()
 
-    if not isinstance(children, list):
+    if not isinstance(
+        children,
+        list,
+    ):
+
         return
 
     for child_ref in children:
@@ -157,9 +202,12 @@ def traverse_children(
             child_ref,
             dict,
         ):
+
             continue
 
-        ref = child_ref.get("$ref")
+        ref = child_ref.get(
+            "$ref"
+        )
 
         if not ref:
             continue
@@ -167,25 +215,24 @@ def traverse_children(
         if ref in visited:
             continue
 
-        item = lookup.get(ref)
+        item = lookup.get(
+            ref
+        )
 
         if item is None:
             continue
-
-        label = str(
-            item.get(
-                "label",
-                "",
-            )
-        ).lower()
 
         # ----------------------------------------------------
         # GROUP
         # ----------------------------------------------------
 
-        if ref.startswith("#/groups/"):
+        if ref.startswith(
+            "#/groups/"
+        ):
 
-            visited.add(ref)
+            visited.add(
+                ref
+            )
 
             group_children = item.get(
                 "children",
@@ -204,7 +251,9 @@ def traverse_children(
 
         else:
 
-            visited.add(ref)
+            visited.add(
+                ref
+            )
 
             yield item
 
@@ -213,12 +262,15 @@ def traverse_children(
 # PAGE EXTRACTION
 # ============================================================
 
-def get_page_from_dict(item):
+def get_page_from_dict(
+    item,
+):
 
     if not isinstance(
         item,
         dict,
     ):
+
         return None
 
     prov = item.get(
@@ -230,6 +282,7 @@ def get_page_from_dict(item):
         prov,
         list,
     ):
+
         return None
 
     for provenance in prov:
@@ -238,6 +291,7 @@ def get_page_from_dict(item):
             provenance,
             dict,
         ):
+
             continue
 
         page_no = provenance.get(
@@ -247,9 +301,13 @@ def get_page_from_dict(item):
         if page_no is not None:
 
             try:
-                return int(page_no)
+
+                return int(
+                    page_no
+                )
 
             except Exception:
+
                 pass
 
     return None
@@ -259,12 +317,15 @@ def get_page_from_dict(item):
 # TEXT EXTRACTION
 # ============================================================
 
-def get_text_from_dict(item):
+def get_text_from_dict(
+    item,
+):
 
     if not isinstance(
         item,
         dict,
     ):
+
         return ""
 
     for key in (
@@ -290,10 +351,6 @@ def get_text_from_dict(item):
             if value:
                 return value
 
-    # --------------------------------------------------------
-    # Captions may be a list
-    # --------------------------------------------------------
-
     captions = item.get(
         "captions"
     )
@@ -307,29 +364,34 @@ def get_text_from_dict(item):
 
         for caption in captions:
 
-            if isinstance(
+            if not isinstance(
                 caption,
                 dict,
             ):
 
-                value = (
-                    caption.get("text")
-                    or caption.get("orig")
-                    or caption.get("content")
-                    or ""
-                )
+                continue
 
-                value = clean_text(
+            value = (
+                caption.get("text")
+                or caption.get("orig")
+                or caption.get("content")
+                or ""
+            )
+
+            value = clean_text(
+                value
+            )
+
+            if value:
+                parts.append(
                     value
                 )
 
-                if value:
-                    parts.append(
-                        value
-                    )
-
         if parts:
-            return " ".join(parts)
+
+            return " ".join(
+                parts
+            )
 
     return ""
 
@@ -338,12 +400,15 @@ def get_text_from_dict(item):
 # TABLE EXTRACTION
 # ============================================================
 
-def extract_table_cells(table_dict):
+def extract_table_cells(
+    table_dict,
+):
 
     if not isinstance(
         table_dict,
         dict,
     ):
+
         return []
 
     data = table_dict.get(
@@ -363,9 +428,8 @@ def extract_table_cells(table_dict):
             cells,
             list,
         ):
-            return cells
 
-    # Compatibility with older structures
+            return cells
 
     for key in (
         "table_cells",
@@ -380,12 +444,15 @@ def extract_table_cells(table_dict):
             cells,
             list,
         ):
+
             return cells
 
     return []
 
 
-def table_to_text(table_dict):
+def table_to_text(
+    table_dict,
+):
 
     cells = extract_table_cells(
         table_dict
@@ -394,7 +461,9 @@ def table_to_text(table_dict):
     if not cells:
         return ""
 
-    rows = defaultdict(list)
+    rows = defaultdict(
+        list
+    )
 
     for cell in cells:
 
@@ -402,12 +471,13 @@ def table_to_text(table_dict):
             cell,
             dict,
         ):
+
             continue
 
         text = clean_text(
             cell.get(
                 "text",
-                ""
+                "",
             )
         )
 
@@ -419,11 +489,13 @@ def table_to_text(table_dict):
         )
 
         if row_index is None:
+
             row_index = cell.get(
                 "row_index"
             )
 
         if row_index is None:
+
             row_index = cell.get(
                 "row"
             )
@@ -433,19 +505,23 @@ def table_to_text(table_dict):
         )
 
         if col_index is None:
+
             col_index = cell.get(
                 "col_index"
             )
 
         if col_index is None:
+
             col_index = cell.get(
                 "column"
             )
 
         if row_index is None:
+
             row_index = 0
 
         if col_index is None:
+
             col_index = len(
                 rows[row_index]
             )
@@ -479,7 +555,9 @@ def table_to_text(table_dict):
         if any(values):
 
             output.append(
-                " | ".join(values)
+                " | ".join(
+                    values
+                )
             )
 
     return "\n".join(
@@ -501,6 +579,7 @@ def build_canonical_document(
         document_dict,
         dict,
     ):
+
         return canonical
 
     lookup = build_reference_lookup(
@@ -509,18 +588,19 @@ def build_canonical_document(
 
     body = document_dict.get(
         "body",
-        {}
+        {},
     )
 
     if not isinstance(
         body,
         dict,
     ):
+
         return canonical
 
     body_children = body.get(
         "children",
-        []
+        [],
     )
 
     visited = set()
@@ -541,6 +621,7 @@ def build_canonical_document(
             item,
             dict,
         ):
+
             continue
 
         label = str(
@@ -554,11 +635,14 @@ def build_canonical_document(
             item
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # TABLE
-        # ====================================================
+        # ----------------------------------------------------
 
-        if label == "table" or "table" in label:
+        if (
+            label == "table"
+            or "table" in label
+        ):
 
             text = table_to_text(
                 item
@@ -566,9 +650,9 @@ def build_canonical_document(
 
             element_type = "table"
 
-        # ====================================================
+        # ----------------------------------------------------
         # PICTURE
-        # ====================================================
+        # ----------------------------------------------------
 
         elif (
             label == "picture"
@@ -582,9 +666,9 @@ def build_canonical_document(
 
             element_type = "visual"
 
-        # ====================================================
+        # ----------------------------------------------------
         # TEXT
-        # ====================================================
+        # ----------------------------------------------------
 
         else:
 
@@ -601,9 +685,9 @@ def build_canonical_document(
         if not text:
             continue
 
-        # ====================================================
-        # SECTION HEADER
-        # ====================================================
+        # ----------------------------------------------------
+        # SECTION
+        # ----------------------------------------------------
 
         if label in (
             "section_header",
@@ -662,6 +746,7 @@ def extract_visual_manifest(
         pictures,
         list,
     ):
+
         return manifest
 
     for index, picture in enumerate(
@@ -673,6 +758,7 @@ def extract_visual_manifest(
             picture,
             dict,
         ):
+
             continue
 
         page = get_page_from_dict(
@@ -683,12 +769,14 @@ def extract_visual_manifest(
             picture
         )
 
-        image_path = None
+        # ----------------------------------------------------
+        # Picture files are currently not decoded.
+        #
+        # Visual descriptions are not part of the current
+        # deployment-safe pipeline.
+        # ----------------------------------------------------
 
-        # ----------------------------------------------------
-        # We do not need to decode the embedded image here.
-        # Docling's main extraction remains responsible for it.
-        # ----------------------------------------------------
+        image_path = None
 
         manifest.append(
             {
@@ -699,7 +787,7 @@ def extract_visual_manifest(
                     page,
 
                 "image_path":
-                    None,
+                    image_path,
 
                 "caption":
                     caption,
@@ -760,6 +848,7 @@ def build_chunks(
             )
 
             if page is not None:
+
                 pages.append(
                     page
                 )
@@ -769,6 +858,7 @@ def build_chunks(
             )
 
             if element_id is not None:
+
                 element_ids.append(
                     element_id
                 )
@@ -778,6 +868,7 @@ def build_chunks(
             )
 
             if element_type:
+
                 element_types.append(
                     element_type
                 )
@@ -787,6 +878,7 @@ def build_chunks(
             )
 
             if section:
+
                 sections.append(
                     section
                 )
@@ -900,23 +992,22 @@ def build_chunks(
         text = clean_text(
             element.get(
                 "text",
-                ""
+                "",
             )
         )
 
         if not text:
             continue
 
-        # Do not index isolated page numbers.
-
         if is_probable_page_number(
             text
         ):
+
             continue
 
         element_type = element.get(
             "type",
-            "text"
+            "text",
         )
 
         page = element.get(
@@ -936,15 +1027,16 @@ def build_chunks(
         )
 
         if not sentences:
+
             sentences = [
                 text
             ]
 
         for sentence in sentences:
 
-            # =================================================
+            # ------------------------------------------------
             # LONG SENTENCE
-            # =================================================
+            # ------------------------------------------------
 
             if len(sentence) > max_chars:
 
@@ -997,6 +1089,7 @@ def build_chunks(
                                 current_length
                                 >= max_chars
                             ):
+
                                 flush()
 
                         partial = word
@@ -1037,13 +1130,14 @@ def build_chunks(
                     )
 
                 if current_length >= max_chars:
+
                     flush()
 
                 continue
 
-            # =================================================
+            # ------------------------------------------------
             # NORMAL SENTENCE
-            # =================================================
+            # ------------------------------------------------
 
             additional_length = (
                 len(sentence)
@@ -1093,6 +1187,7 @@ def build_chunks(
     # ========================================================
 
     if current_parts:
+
         flush()
 
     return chunks
@@ -1123,7 +1218,8 @@ def process_pdf(
     )
 
     image_dir = (
-        work_dir / "images"
+        work_dir
+        / "images"
     )
 
     visual_json = (
@@ -1146,19 +1242,38 @@ def process_pdf(
         PdfPipelineOptions()
     )
 
-    # OCR disabled because RapidOCR currently attempts
-    # to write model files into the read-only Python
-    # site-packages environment on Streamlit Cloud.
+    # --------------------------------------------------------
+    # OCR disabled for Streamlit Cloud deployment.
     #
-    # Embedded digital-PDF text is still extracted.
+    # This prevents RapidOCR from attempting to write model
+    # files into the read-only Python site-packages directory.
+    # --------------------------------------------------------
 
     pipeline_options.do_ocr = False
 
+    # --------------------------------------------------------
+    # Keep table extraction.
+    # --------------------------------------------------------
+
     pipeline_options.do_table_structure = True
 
-    pipeline_options.generate_picture_images = True
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Picture image generation is disabled for now because
+    # the current RAG pipeline does not consume the generated
+    # image files.
+    #
+    # This reduces memory and disk usage on Streamlit Cloud.
+    # --------------------------------------------------------
+
+    pipeline_options.generate_picture_images = False
 
     pipeline_options.do_picture_description = False
+
+    # ========================================================
+    # DOCLING CONVERTER
+    # ========================================================
 
     converter = DocumentConverter(
         format_options={
@@ -1173,7 +1288,7 @@ def process_pdf(
     if progress_callback:
 
         progress_callback(
-            "⏳ Docling is extracting text, tables and visuals...",
+            "⏳ Docling is extracting text and tables...",
             0.10,
         )
 
@@ -1210,27 +1325,27 @@ def process_pdf(
         )
 
     # ========================================================
-    # RAW EXTRACTION COUNTS
+    # RAW COUNTS
     # ========================================================
 
     raw_text_count = len(
         document_dict.get(
             "texts",
-            []
+            [],
         )
     )
 
     raw_table_count = len(
         document_dict.get(
             "tables",
-            []
+            [],
         )
     )
 
     raw_picture_count = len(
         document_dict.get(
             "pictures",
-            []
+            [],
         )
     )
 
@@ -1278,7 +1393,10 @@ def process_pdf(
     if progress_callback:
 
         progress_callback(
-            f"✓ Extracted {len(visual_manifest)} visual elements",
+            (
+                f"✓ Extracted "
+                f"{len(visual_manifest)} visual elements"
+            ),
             0.55,
         )
 
@@ -1327,25 +1445,29 @@ def process_pdf(
     text_count = sum(
         1
         for item in canonical_elements
-        if item.get("type") == "text"
+        if item.get("type")
+        == "text"
     )
 
     table_count = sum(
         1
         for item in canonical_elements
-        if item.get("type") == "table"
+        if item.get("type")
+        == "table"
     )
 
     visual_count = sum(
         1
         for item in canonical_elements
-        if item.get("type") == "visual"
+        if item.get("type")
+        == "visual"
     )
 
     pages = [
         item.get("page")
         for item in canonical_elements
-        if item.get("page") is not None
+        if item.get("page")
+        is not None
     ]
 
     statistics = {
@@ -1444,10 +1566,9 @@ def process_pdf(
                 indent=2,
             )
 
-        # Save raw Docling structure for debugging.
-        #
-        # This is intentionally useful during deployment.
-        # It can be removed later if file size becomes an issue.
+        # ----------------------------------------------------
+        # Raw Docling structure.
+        # ----------------------------------------------------
 
         with open(
             docling_path,
