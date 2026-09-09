@@ -1,8 +1,6 @@
 from pathlib import Path
 import json
 import re
-import tempfile
-import shutil
 from collections import defaultdict
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -61,17 +59,15 @@ def table_to_text(table_dict):
 
         text = clean_text(text)
 
-        row_index = (
-            cell.get("row_index")
-            if cell.get("row_index") is not None
-            else cell.get("row")
-        )
+        row_index = cell.get("row_index")
 
-        col_index = (
-            cell.get("col_index")
-            if cell.get("col_index") is not None
-            else cell.get("column")
-        )
+        if row_index is None:
+            row_index = cell.get("row")
+
+        col_index = cell.get("col_index")
+
+        if col_index is None:
+            col_index = cell.get("column")
 
         if row_index is None:
             row_index = 0
@@ -79,7 +75,9 @@ def table_to_text(table_dict):
         if col_index is None:
             col_index = len(rows[row_index])
 
-        rows[row_index].append((col_index, text))
+        rows[row_index].append(
+            (col_index, text)
+        )
 
     if not rows:
         return ""
@@ -87,32 +85,52 @@ def table_to_text(table_dict):
     output = []
 
     for row_index in sorted(rows):
-        row = sorted(rows[row_index], key=lambda x: x[0])
-        values = [value for _, value in row]
+        row = sorted(
+            rows[row_index],
+            key=lambda x: x[0]
+        )
+
+        values = [
+            value
+            for _, value in row
+        ]
 
         if any(values):
-            output.append(" | ".join(values))
+            output.append(
+                " | ".join(values)
+            )
 
     return "\n".join(output).strip()
 
 
 def get_page(item):
     try:
-        prov = getattr(item, "prov", None)
+        prov = getattr(
+            item,
+            "prov",
+            None
+        )
 
         if prov:
             first = prov[0]
 
-            page_no = getattr(first, "page_no", None)
+            page_no = getattr(
+                first,
+                "page_no",
+                None
+            )
 
             if page_no is not None:
                 return int(page_no)
 
             if isinstance(first, dict):
-                page_no = first.get("page_no")
+                page_no = first.get(
+                    "page_no"
+                )
 
                 if page_no is not None:
                     return int(page_no)
+
     except Exception:
         pass
 
@@ -120,34 +138,59 @@ def get_page(item):
 
 
 def get_text(item):
-    for attr in ("text", "content", "caption"):
-
+    for attr in (
+        "text",
+        "content",
+        "caption",
+    ):
         try:
-            value = getattr(item, attr, None)
+            value = getattr(
+                item,
+                attr,
+                None
+            )
 
             if value:
                 return clean_text(value)
+
         except Exception:
             pass
 
     try:
-        if hasattr(item, "export_to_dict"):
+        if hasattr(
+            item,
+            "export_to_dict"
+        ):
             data = item.export_to_dict()
 
             if isinstance(data, dict):
-                for key in ("text", "content", "caption"):
+
+                for key in (
+                    "text",
+                    "content",
+                    "caption",
+                ):
                     value = data.get(key)
 
                     if value:
-                        return clean_text(value)
+                        return clean_text(
+                            value
+                        )
+
     except Exception:
         pass
 
     return ""
 
 
-def extract_visual_manifest(doc, image_dir):
-    image_dir.mkdir(parents=True, exist_ok=True)
+def extract_visual_manifest(
+    doc,
+    image_dir
+):
+    image_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     manifest = []
 
@@ -159,9 +202,19 @@ def extract_visual_manifest(doc, image_dir):
     visual_index = 0
 
     for item in items:
-        label = str(getattr(item, "label", "")).lower()
 
-        if "picture" not in label and "image" not in label:
+        label = str(
+            getattr(
+                item,
+                "label",
+                ""
+            )
+        ).lower()
+
+        if (
+            "picture" not in label
+            and "image" not in label
+        ):
             continue
 
         visual_index += 1
@@ -174,8 +227,16 @@ def extract_visual_manifest(doc, image_dir):
             image = item.get_image(doc)
 
             if image is not None:
-                image_path = image_dir / f"visual_{visual_index:04d}.png"
-                image.save(image_path)
+
+                image_path = (
+                    image_dir
+                    / f"visual_{visual_index:04d}.png"
+                )
+
+                image.save(
+                    image_path
+                )
+
         except Exception:
             image_path = None
 
@@ -183,9 +244,16 @@ def extract_visual_manifest(doc, image_dir):
 
         manifest.append(
             {
-                "visual_id": f"visual_{visual_index:04d}",
+                "visual_id":
+                    f"visual_{visual_index:04d}",
+
                 "page": page,
-                "image_path": str(image_path) if image_path else None,
+
+                "image_path":
+                    str(image_path)
+                    if image_path
+                    else None,
+
                 "caption": caption,
             }
         )
@@ -194,43 +262,49 @@ def extract_visual_manifest(doc, image_dir):
 
 
 def build_canonical_document(doc):
+
     canonical = []
 
     try:
-        document_dict = doc.export_to_dict()
+        document_dict = (
+            doc.export_to_dict()
+        )
     except Exception:
         document_dict = {}
 
     item_lookup = {}
 
-    if isinstance(document_dict, dict):
-        for item in document_dict.get("texts", []):
-            if isinstance(item, dict):
-                ref = item.get("self_ref")
+    if isinstance(
+        document_dict,
+        dict
+    ):
+
+        for key in (
+            "texts",
+            "tables",
+            "pictures",
+            "groups",
+        ):
+
+            for item in document_dict.get(
+                key,
+                []
+            ):
+
+                if not isinstance(
+                    item,
+                    dict
+                ):
+                    continue
+
+                ref = item.get(
+                    "self_ref"
+                )
 
                 if ref:
-                    item_lookup[ref] = item
-
-        for item in document_dict.get("tables", []):
-            if isinstance(item, dict):
-                ref = item.get("self_ref")
-
-                if ref:
-                    item_lookup[ref] = item
-
-        for item in document_dict.get("pictures", []):
-            if isinstance(item, dict):
-                ref = item.get("self_ref")
-
-                if ref:
-                    item_lookup[ref] = item
-
-        for item in document_dict.get("groups", []):
-            if isinstance(item, dict):
-                ref = item.get("self_ref")
-
-                if ref:
-                    item_lookup[ref] = item
+                    item_lookup[
+                        ref
+                    ] = item
 
     try:
         items = doc.iterate_items()
@@ -239,39 +313,71 @@ def build_canonical_document(doc):
 
     for index, item in enumerate(items):
 
-        label = str(getattr(item, "label", "")).lower()
+        label = str(
+            getattr(
+                item,
+                "label",
+                ""
+            )
+        ).lower()
+
         page = get_page(item)
 
         text = ""
 
         if "table" in label:
+
             try:
-                ref = getattr(item, "self_ref", None)
+                ref = getattr(
+                    item,
+                    "self_ref",
+                    None
+                )
 
                 if ref is None:
+
                     try:
-                        item_dict = item.export_to_dict()
-                        ref = item_dict.get("self_ref")
+                        item_dict = (
+                            item.export_to_dict()
+                        )
+
+                        ref = item_dict.get(
+                            "self_ref"
+                        )
+
                     except Exception:
                         item_dict = None
 
-                table_dict = item_lookup.get(ref)
+                table_dict = (
+                    item_lookup.get(ref)
+                )
 
                 if table_dict is None:
+
                     try:
-                        table_dict = item.export_to_dict()
+                        table_dict = (
+                            item.export_to_dict()
+                        )
+
                     except Exception:
                         table_dict = None
 
-                text = table_to_text(table_dict)
+                text = table_to_text(
+                    table_dict
+                )
 
             except Exception:
                 text = ""
 
-        elif "picture" in label or "image" in label:
+        elif (
+            "picture" in label
+            or "image" in label
+        ):
+
             text = get_text(item)
 
         else:
+
             text = get_text(item)
 
         text = clean_text(text)
@@ -279,16 +385,22 @@ def build_canonical_document(doc):
         if not text:
             continue
 
+        if "table" in label:
+            element_type = "table"
+
+        elif (
+            "picture" in label
+            or "image" in label
+        ):
+            element_type = "visual"
+
+        else:
+            element_type = "text"
+
         canonical.append(
             {
                 "element_id": index,
-                "type": (
-                    "table"
-                    if "table" in label
-                    else "visual"
-                    if ("picture" in label or "image" in label)
-                    else "text"
-                ),
+                "type": element_type,
                 "page": page,
                 "text": text,
             }
@@ -298,21 +410,29 @@ def build_canonical_document(doc):
 
 
 def is_probable_page_number(text):
+
     text = clean_text(text)
 
     if not text:
         return False
 
-    if re.fullmatch(r"\d{1,4}", text):
+    if re.fullmatch(
+        r"\d{1,4}",
+        text
+    ):
         return True
 
-    if re.fullmatch(r"(page\s*)?\d{1,4}", text.lower()):
+    if re.fullmatch(
+        r"(page\s*)?\d{1,4}",
+        text.lower()
+    ):
         return True
 
     return False
 
 
 def split_sentences(text):
+
     text = clean_text(text)
 
     if not text:
@@ -323,13 +443,11 @@ def split_sentences(text):
         text
     )
 
-    sentences = [
+    return [
         clean_text(sentence)
         for sentence in sentences
         if clean_text(sentence)
     ]
-
-    return sentences
 
 
 def build_chunks(
@@ -337,86 +455,173 @@ def build_chunks(
     max_chars=2200,
     overlap_chars=300,
 ):
+
     chunks = []
 
     current_parts = []
     current_length = 0
 
     def flush():
+
         nonlocal current_parts
         nonlocal current_length
 
         if not current_parts:
             return
 
-        text = "\n\n".join(current_parts).strip()
+        text = "\n\n".join(
+            part["text"]
+            for part in current_parts
+        ).strip()
 
-        if text:
-            first_page = None
-            last_page = None
-            element_ids = []
+        if not text:
+            current_parts = []
+            current_length = 0
+            return
 
-            for part in current_parts:
-                metadata = part["metadata"]
+        pages = []
 
-                if metadata.get("page") is not None:
-                    if first_page is None:
-                        first_page = metadata["page"]
+        element_ids = []
+        types = []
 
-                    last_page = metadata["page"]
+        for part in current_parts:
 
-                element_ids.append(metadata.get("element_id"))
+            metadata = part[
+                "metadata"
+            ]
 
-            chunks.append(
-                {
-                    "chunk_id": len(chunks),
-                    "text": text,
-                    "metadata": {
-                        "page": first_page,
-                        "last_page": last_page,
-                        "element_ids": element_ids,
-                        "types": list(
-                            dict.fromkeys(
-                                p["metadata"].get("type")
-                                for p in current_parts
-                            )
-                        ),
-                    },
-                }
+            page = metadata.get(
+                "page"
             )
 
-        if overlap_chars > 0 and text:
+            if page is not None:
+                pages.append(page)
+
+            element_id = metadata.get(
+                "element_id"
+            )
+
+            if element_id is not None:
+                element_ids.append(
+                    element_id
+                )
+
+            element_type = metadata.get(
+                "type"
+            )
+
+            if element_type:
+                types.append(
+                    element_type
+                )
+
+        first_page = (
+            min(pages)
+            if pages
+            else None
+        )
+
+        last_page = (
+            max(pages)
+            if pages
+            else None
+        )
+
+        chunks.append(
+            {
+                "chunk_id":
+                    len(chunks),
+
+                "text": text,
+
+                "metadata":
+                    {
+                        "page":
+                            first_page,
+
+                        "last_page":
+                            last_page,
+
+                        "element_ids":
+                            element_ids,
+
+                        "types":
+                            list(
+                                dict.fromkeys(
+                                    types
+                                )
+                            ),
+                    },
+            }
+        )
+
+        if overlap_chars > 0:
+
+            overlap_text = (
+                text[-overlap_chars:]
+            )
+
             current_parts = [
                 {
-                    "text": text[-overlap_chars:],
-                    "metadata": {
-                        "page": last_page,
-                        "element_id": None,
-                        "type": "overlap",
-                    },
+                    "text":
+                        overlap_text,
+
+                    "metadata":
+                        {
+                            "page":
+                                last_page,
+
+                            "element_id":
+                                None,
+
+                            "type":
+                                "overlap",
+                        },
                 }
             ]
 
-            current_length = len(text[-overlap_chars:])
+            current_length = len(
+                overlap_text
+            )
+
         else:
+
             current_parts = []
             current_length = 0
 
     for element in canonical:
 
-        text = clean_text(element.get("text", ""))
+        text = clean_text(
+            element.get(
+                "text",
+                ""
+            )
+        )
 
         if not text:
             continue
 
-        if is_probable_page_number(text):
+        if is_probable_page_number(
+            text
+        ):
             continue
 
-        element_type = element.get("type", "text")
-        page = element.get("page")
-        element_id = element.get("element_id")
+        element_type = element.get(
+            "type",
+            "text"
+        )
 
-        sentences = split_sentences(text)
+        page = element.get(
+            "page"
+        )
+
+        element_id = element.get(
+            "element_id"
+        )
+
+        sentences = split_sentences(
+            text
+        )
 
         if not sentences:
             sentences = [text]
@@ -436,22 +641,42 @@ def build_chunks(
                         else word
                     )
 
-                    if len(candidate) > max_chars:
+                    if (
+                        len(candidate)
+                        > max_chars
+                    ):
 
                         if partial:
+
                             part = {
-                                "text": partial,
-                                "metadata": {
-                                    "page": page,
-                                    "element_id": element_id,
-                                    "type": element_type,
-                                },
+                                "text":
+                                    partial,
+
+                                "metadata":
+                                    {
+                                        "page":
+                                            page,
+
+                                        "element_id":
+                                            element_id,
+
+                                        "type":
+                                            element_type,
+                                    },
                             }
 
-                            current_parts.append(part)
-                            current_length += len(partial)
+                            current_parts.append(
+                                part
+                            )
 
-                            if current_length >= max_chars:
+                            current_length += (
+                                len(partial)
+                            )
+
+                            if (
+                                current_length
+                                >= max_chars
+                            ):
                                 flush()
 
                         partial = word
@@ -460,40 +685,73 @@ def build_chunks(
                         partial = candidate
 
                 if partial:
+
                     part = {
-                        "text": partial,
-                        "metadata": {
-                            "page": page,
-                            "element_id": element_id,
-                            "type": element_type,
-                        },
+                        "text":
+                            partial,
+
+                        "metadata":
+                            {
+                                "page":
+                                    page,
+
+                                "element_id":
+                                    element_id,
+
+                                "type":
+                                    element_type,
+                            },
                     }
 
-                    current_parts.append(part)
-                    current_length += len(partial)
+                    current_parts.append(
+                        part
+                    )
+
+                    current_length += (
+                        len(partial)
+                    )
 
                 if current_length >= max_chars:
                     flush()
 
                 continue
 
-            part = {
-                "text": sentence,
-                "metadata": {
-                    "page": page,
-                    "element_id": element_id,
-                    "type": element_type,
-                },
-            }
+            additional_length = (
+                len(sentence) + 2
+            )
 
             if (
                 current_length > 0
-                and current_length + len(sentence) + 2 > max_chars
+                and current_length
+                + additional_length
+                > max_chars
             ):
                 flush()
 
-            current_parts.append(part)
-            current_length += len(sentence) + 2
+            part = {
+                "text":
+                    sentence,
+
+                "metadata":
+                    {
+                        "page":
+                            page,
+
+                        "element_id":
+                            element_id,
+
+                        "type":
+                            element_type,
+                    },
+            }
+
+            current_parts.append(
+                part
+            )
+
+            current_length += (
+                additional_length
+            )
 
     if current_parts:
         flush()
@@ -507,98 +765,153 @@ def process_pdf(
     api_key: str,
     progress_callback=None,
 ):
-    work_dir = Path(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
 
-    image_dir = work_dir / "images"
-    visual_json = work_dir / "visual_descriptions.json"
+    pdf_path = Path(pdf_path)
+    work_dir = Path(work_dir)
+
+    work_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    image_dir = (
+        work_dir / "images"
+    )
+
+    visual_json = (
+        work_dir
+        / "visual_descriptions.json"
+    )
 
     if progress_callback:
+
         progress_callback(
             "✓ PDF loaded — starting Docling extraction",
             0.05,
         )
 
+    # IMPORTANT:
+    # Do NOT specify artifacts_path here.
+    #
+    # Streamlit Cloud uses a read-only
+    # Python site-packages directory.
+    #
+    # Leaving artifacts_path as None allows
+    # Docling to use its normal model cache
+    # and automatically download required
+    # models.
     pipeline_options = PdfPipelineOptions()
 
     pipeline_options.do_table_structure = True
+
     pipeline_options.generate_picture_images = True
+
     pipeline_options.do_picture_description = False
 
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_options=pipeline_options
-            )
+            InputFormat.PDF:
+                PdfFormatOption(
+                    pipeline_options=
+                        pipeline_options
+                )
         }
     )
 
     if progress_callback:
+
         progress_callback(
             "⏳ Docling is extracting text, tables and visuals...",
             0.10,
         )
 
-    result = converter.convert(str(pdf_path))
+    result = converter.convert(
+        str(pdf_path)
+    )
+
     doc = result.document
 
     if progress_callback:
+
         progress_callback(
             "✓ Docling extraction completed",
             0.45,
         )
 
-    visual_manifest = extract_visual_manifest(
-        doc,
-        image_dir,
+    visual_manifest = (
+        extract_visual_manifest(
+            doc,
+            image_dir
+        )
     )
 
     if progress_callback:
+
         progress_callback(
             f"✓ Extracted {len(visual_manifest)} visual elements",
             0.55,
         )
 
     try:
+
         with open(
             visual_json,
             "w",
             encoding="utf-8",
         ) as f:
+
             json.dump(
                 visual_manifest,
                 f,
                 ensure_ascii=False,
                 indent=2,
             )
+
     except Exception:
         pass
 
-    canonical = build_canonical_document(doc)
+    canonical = (
+        build_canonical_document(
+            doc
+        )
+    )
 
     if progress_callback:
+
         progress_callback(
             f"✓ Built canonical document with {len(canonical)} elements",
             0.65,
         )
 
-    chunks = build_chunks(canonical)
+    chunks = build_chunks(
+        canonical
+    )
 
     if progress_callback:
+
         progress_callback(
             f"✓ Created {len(chunks)} structure-aware chunks",
             0.80,
         )
 
-    canonical_path = work_dir / "canonical_document.json"
-    chunks_path = work_dir / "chunks.json"
+    canonical_path = (
+        work_dir
+        / "canonical_document.json"
+    )
+
+    chunks_path = (
+        work_dir
+        / "chunks.json"
+    )
 
     try:
+
         with open(
             canonical_path,
             "w",
             encoding="utf-8",
         ) as f:
+
             json.dump(
                 canonical,
                 f,
@@ -611,19 +924,26 @@ def process_pdf(
             "w",
             encoding="utf-8",
         ) as f:
+
             json.dump(
                 chunks,
                 f,
                 ensure_ascii=False,
                 indent=2,
             )
+
     except Exception:
         pass
 
     if progress_callback:
+
         progress_callback(
             "✓ PDF processing completed",
             1.0,
         )
 
-    return canonical, chunks, work_dir
+    return (
+        canonical,
+        chunks,
+        work_dir
+    )
