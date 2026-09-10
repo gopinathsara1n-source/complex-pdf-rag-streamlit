@@ -1,0 +1,9 @@
+streamlit>=1.40
+docling
+google-genai
+sentence-transformers
+transformers
+torch
+faiss-cpu
+Pillow
+numpy
