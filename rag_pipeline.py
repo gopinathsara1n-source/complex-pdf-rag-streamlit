@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import gc
@@ -11,42 +10,107 @@ from typing import Callable, Any
 import numpy as np
 
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
 INDEX_ROOT = Path(os.getenv("RAG_INDEX_ROOT", "storage"))
 INDEX_ROOT.mkdir(parents=True, exist_ok=True)
+
+EMBEDDING_MODEL_NAME = os.getenv(
+    "EMBEDDING_MODEL",
+    "BAAI/bge-m3",
+)
+
+EMBEDDING_BATCH_SIZE = int(
+    os.getenv("EMBEDDING_BATCH_SIZE", "4")
+)
+
+DEFAULT_TOP_K = int(
+    os.getenv("TOP_K", "5")
+)
+
+CHUNK_TARGET = int(
+    os.getenv("CHUNK_TARGET", "1800")
+)
+
+CHUNK_MAXIMUM = int(
+    os.getenv("CHUNK_MAXIMUM", "3200")
+)
+
 
 Progress = Callable[[float, str], None] | None
 
 
-def _progress(cb, frac, message):
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _progress(
+    cb: Progress,
+    frac: float,
+    message: str,
+) -> None:
     if cb:
         cb(float(frac), message)
 
 
-def _doc_dir(document_id):
+def _doc_dir(document_id: str) -> Path:
     return INDEX_ROOT / document_id
 
 
-def load_manifest(document_id):
-    p = _doc_dir(document_id) / "manifest.json"
-    if not p.exists():
+def load_manifest(
+    document_id: str,
+) -> dict[str, Any] | None:
+
+    path = _doc_dir(document_id) / "manifest.json"
+
+    if not path.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8")
+        )
+    except Exception:
+        return None
 
 
-def _atomic_json(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
+def _atomic_json(
+    path: Path,
+    data: Any,
+) -> None:
+
+    tmp = path.with_suffix(
+        path.suffix + ".tmp"
+    )
+
     tmp.write_text(
-        json.dumps(data, ensure_ascii=False),
+        json.dumps(
+            data,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
+
     tmp.replace(path)
 
 
-def _iter_collection(doc, names):
+def _iter_collection(
+    doc: Any,
+    names: list[str],
+) -> list[Any]:
+
     for name in names:
-        value = getattr(doc, name, None)
+
+        value = getattr(
+            doc,
+            name,
+            None,
+        )
 
         if value is not None:
+
             try:
                 return list(value)
             except TypeError:
@@ -55,11 +119,22 @@ def _iter_collection(doc, names):
     return []
 
 
-def _page(obj):
-    for name in ("page_no", "page", "page_number"):
-        value = getattr(obj, name, None)
+def _page(obj: Any) -> int | None:
+
+    for name in (
+        "page_no",
+        "page",
+        "page_number",
+    ):
+
+        value = getattr(
+            obj,
+            name,
+            None,
+        )
 
         if value is not None:
+
             try:
                 return int(value)
             except Exception:
@@ -68,9 +143,19 @@ def _page(obj):
     return None
 
 
-def _text(obj):
-    for name in ("text", "caption", "label"):
-        value = getattr(obj, name, None)
+def _text(obj: Any) -> str:
+
+    for name in (
+        "text",
+        "caption",
+        "label",
+    ):
+
+        value = getattr(
+            obj,
+            name,
+            None,
+        )
 
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -78,115 +163,196 @@ def _text(obj):
     return ""
 
 
-def _convert_pdf(pdf_path):
-    """
-    Convert PDF using Docling.
+# ============================================================
+# DOCLING PDF CONVERSION
+# ============================================================
 
-    OCR is intentionally disabled because this project does not require
-    OCR/RapidOCR for its target PDFs.
-
-    Table structure extraction remains enabled.
-    Picture extraction remains enabled so that charts/figures can be
-    passed to the Gemini visual-description stage.
-    """
+def _convert_pdf(
+    pdf_path: Path,
+):
 
     from docling.document_converter import (
         DocumentConverter,
         PdfFormatOption,
     )
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.datamodel.base_models import InputFormat
 
-    opts = PdfPipelineOptions()
+    from docling.datamodel.pipeline_options import (
+        PdfPipelineOptions,
+    )
 
-    # OCR is not required for this project.
-    # This prevents Docling from initializing RapidOCR and downloading
-    # PP-OCR model files.
-    opts.do_ocr = False
+    from docling.datamodel.base_models import (
+        InputFormat,
+    )
 
-    # Keep table extraction enabled.
-    opts.do_table_structure = True
+    options = PdfPipelineOptions()
 
-    # Keep picture extraction enabled for chart/figure processing.
-    opts.generate_picture_images = True
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # OCR is intentionally disabled.
+    #
+    # This prevents RapidOCR model downloads and permission
+    # problems on Streamlit Cloud.
+    # --------------------------------------------------------
+
+    options.do_ocr = False
+
+    # --------------------------------------------------------
+    # Table structure extraction stays enabled.
+    # This is important for complex PDFs.
+    # --------------------------------------------------------
+
+    options.do_table_structure = True
+
+    # --------------------------------------------------------
+    # Extract pictures so charts/figures can be passed
+    # through the Gemini visual-description stage.
+    # --------------------------------------------------------
+
+    options.generate_picture_images = True
 
     converter = DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(
-                pipeline_options=opts
+                pipeline_options=options
             )
         }
     )
 
-    return converter.convert(pdf_path)
+    result = converter.convert(
+        str(pdf_path)
+    )
+
+    del converter
+    gc.collect()
+
+    return result
 
 
-def _find_visual_labels(doc):
-    labels = []
+# ============================================================
+# VISUAL DETECTION
+# ============================================================
 
-    for item in _iter_collection(
+def _find_visual_labels(
+    doc: Any,
+) -> list[dict[str, Any]]:
+
+    labels: list[dict[str, Any]] = []
+
+    items = _iter_collection(
         doc,
-        ["texts", "text_items", "texts_and_tables"],
-    ):
-        txt = _text(item)
+        [
+            "texts",
+            "text_items",
+            "texts_and_tables",
+        ],
+    )
+
+    for item in items:
+
+        text = _text(item)
 
         if re.search(
             r"\b(chart|figure|fig\.?)\b",
-            txt,
-            re.I,
+            text,
+            re.IGNORECASE,
         ):
+
             labels.append(
                 {
                     "page": _page(item),
-                    "label": txt,
+                    "label": text,
                 }
             )
 
     return labels
 
 
-def _selected_pictures(doc, labels):
+def _selected_pictures(
+    doc: Any,
+    labels: list[dict[str, Any]],
+) -> list[tuple[Any, int | None]]:
+
     pictures = _iter_collection(
         doc,
-        ["pictures", "picture_items"],
+        [
+            "pictures",
+            "picture_items",
+        ],
     )
 
     pages = {
-        x["page"]
-        for x in labels
-        if x.get("page") is not None
+        item["page"]
+        for item in labels
+        if item.get("page") is not None
     }
 
     if not pages:
         return []
 
-    return [
-        (picture, _page(picture))
-        for picture in pictures
-        if _page(picture) in pages
-    ]
+    selected = []
+
+    for picture in pictures:
+
+        page = _page(picture)
+
+        if page in pages:
+
+            selected.append(
+                (
+                    picture,
+                    page,
+                )
+            )
+
+    return selected
 
 
-def _picture_image(picture, doc):
-    if hasattr(picture, "get_image"):
+def _picture_image(
+    picture: Any,
+    doc: Any,
+):
+
+    if hasattr(
+        picture,
+        "get_image",
+    ):
+
         return picture.get_image(doc)
 
-    return getattr(picture, "image", None)
+    return getattr(
+        picture,
+        "image",
+        None,
+    )
 
 
-def _gemini_describe(image, api_key, model_name, page):
+# ============================================================
+# GEMINI VISUAL DESCRIPTION
+# ============================================================
+
+def _gemini_describe(
+    image: Any,
+    api_key: str,
+    model_name: str,
+    page: int | None,
+) -> str:
+
     from google import genai
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key
+    )
 
     prompt = f"""
-Describe ONLY visible information in this PDF chart/figure for RAG retrieval.
+Describe ONLY the visible information in this
+PDF chart or figure for retrieval-augmented generation.
 
 Page: {page}
 
 Include:
+
 - title
-- type of visual
+- chart/figure type
 - labels
 - legend
 - units
@@ -194,45 +360,89 @@ Include:
 - dates
 - comparisons
 - trends
-- forecasts/annotations
+- forecasts
+- annotations
 - visible source
 
-Do not invent values.
-Do not describe unrelated page content.
+Rules:
+
+1. Use ONLY information visibly present.
+2. Do NOT invent values.
+3. Do NOT estimate unreadable numbers.
+4. Do NOT describe unrelated page content.
+5. Preserve exact numbers and units.
+6. Keep the description factual and concise.
+7. If a value is not readable, do not create one.
 
 Return concise factual prose.
 """
 
     response = client.models.generate_content(
         model=model_name,
-        contents=[prompt, image],
+        contents=[
+            prompt,
+            image,
+        ],
     )
 
-    return (response.text or "").strip()
+    return (
+        response.text or ""
+    ).strip()
 
 
-def _visual_pass(doc, api_key, model_name, cb):
-    labels = _find_visual_labels(doc)
-    selected = _selected_pictures(doc, labels)
+def _visual_pass(
+    doc: Any,
+    api_key: str,
+    model_name: str,
+    cb: Progress,
+) -> list[dict[str, Any]]:
+
+    if not api_key:
+        return []
+
+    labels = _find_visual_labels(
+        doc
+    )
+
+    selected = _selected_pictures(
+        doc,
+        labels,
+    )
 
     descriptions = []
 
-    total = max(1, len(selected))
+    total = max(
+        1,
+        len(selected),
+    )
 
-    for i, (picture, page) in enumerate(selected, 1):
+    for i, (
+        picture,
+        page,
+    ) in enumerate(
+        selected,
+        start=1,
+    ):
 
         _progress(
             cb,
-            0.35 + 0.17 * ((i - 1) / total),
-            f"Describing visual {i}/{total}…",
+            0.35
+            + 0.17
+            * ((i - 1) / total),
+            f"Describing visual {i}/{total}...",
         )
 
         image = None
 
         try:
-            image = _picture_image(picture, doc)
+
+            image = _picture_image(
+                picture,
+                doc,
+            )
 
             if image is not None:
+
                 text = _gemini_describe(
                     image,
                     api_key,
@@ -241,6 +451,7 @@ def _visual_pass(doc, api_key, model_name, cb):
                 )
 
                 if text:
+
                     descriptions.append(
                         {
                             "kind": "visual",
@@ -249,10 +460,23 @@ def _visual_pass(doc, api_key, model_name, cb):
                         }
                     )
 
+        except Exception as exc:
+
+            # A single visual should not destroy
+            # the complete PDF processing pipeline.
+
+            print(
+                f"Visual description failed "
+                f"on page {page}: {exc}"
+            )
+
         finally:
+
             try:
+
                 if image is not None:
                     image.close()
+
             except Exception:
                 pass
 
@@ -262,13 +486,21 @@ def _visual_pass(doc, api_key, model_name, cb):
     _progress(
         cb,
         0.52,
-        f"Visual pass complete: {len(descriptions)} descriptions.",
+        f"Visual pass complete: "
+        f"{len(descriptions)} descriptions.",
     )
 
     return descriptions
 
 
-def _clean_text(text):
+# ============================================================
+# TEXT CLEANING
+# ============================================================
+
+def _clean_text(
+    text: str,
+) -> str:
+
     lines = [
         x.strip()
         for x in text.splitlines()
@@ -278,41 +510,76 @@ def _clean_text(text):
     if len(lines) < 6:
         return "\n".join(lines)
 
-    counts = {}
+    counts: dict[str, int] = {}
 
     for line in lines:
+
         if len(line) <= 180:
-            counts[line] = counts.get(line, 0) + 1
+
+            counts[line] = (
+                counts.get(line, 0)
+                + 1
+            )
 
     repeated = {
-        k
-        for k, v in counts.items()
-        if v >= 3
+        line
+        for line, count
+        in counts.items()
+        if count >= 3
     }
 
     return "\n".join(
-        x
-        for x in lines
-        if x not in repeated
+        line
+        for line in lines
+        if line not in repeated
     )
 
 
-def _table_text(table, doc):
-    fn = getattr(table, "export_to_markdown", None)
+# ============================================================
+# TABLE EXTRACTION
+# ============================================================
+
+def _table_text(
+    table: Any,
+    doc: Any,
+) -> str:
+
+    # Current Docling API
+    fn = getattr(
+        table,
+        "export_to_markdown",
+        None,
+    )
 
     if callable(fn):
+
         try:
-            return fn(doc=doc)
+
+            return fn(
+                doc=doc
+            )
+
         except TypeError:
+
             try:
+
                 return fn(doc)
+
             except Exception:
                 pass
+
         except Exception:
             pass
 
-    fn = getattr(table, "to_markdown", None)
+    # Compatibility fallback
+    fn = getattr(
+        table,
+        "to_markdown",
+        None,
+    )
+
     if callable(fn):
+
         try:
             return fn()
         except Exception:
@@ -321,67 +588,100 @@ def _table_text(table, doc):
     return str(table)
 
 
-def _canonical_elements(doc):
+# ============================================================
+# CANONICAL DOCUMENT
+# ============================================================
+
+def _canonical_elements(
+    doc: Any,
+) -> list[dict[str, Any]]:
+
     elements = []
 
-    # -----------------------------
-    # Text elements
-    # -----------------------------
+    # --------------------------------------------------------
+    # TEXT
+    # --------------------------------------------------------
 
     for item in _iter_collection(
         doc,
-        ["texts", "text_items"],
+        [
+            "texts",
+            "text_items",
+        ],
     ):
-        txt = _clean_text(_text(item))
 
-        if txt:
+        text = _clean_text(
+            _text(item)
+        )
+
+        if text:
+
             elements.append(
                 {
                     "kind": "text",
                     "page": _page(item),
-                    "text": txt,
+                    "text": text,
                 }
             )
 
-    # -----------------------------
-    # Table elements
-    # -----------------------------
+    # --------------------------------------------------------
+    # TABLES
+    # --------------------------------------------------------
 
     for table in _iter_collection(
         doc,
-        ["tables", "table_items"],
+        [
+            "tables",
+            "table_items",
+        ],
     ):
-        txt = _table_text(table, doc).strip()
-        if txt:
+
+        text = _table_text(
+            table,
+            doc,
+        ).strip()
+
+        if text:
+
             elements.append(
                 {
                     "kind": "table",
                     "page": _page(table),
-                    "text": txt,
+                    "text": text,
                 }
             )
 
     return elements
 
 
+# ============================================================
+# CHUNKING
+# ============================================================
+
 def _chunk(
-    elements,
-    target=1800,
-    maximum=3200,
-):
+    elements: list[dict[str, Any]],
+    target: int = CHUNK_TARGET,
+    maximum: int = CHUNK_MAXIMUM,
+) -> list[dict[str, Any]]:
+
     result = []
 
     buffer = []
     length = 0
 
     def flush():
-        nonlocal buffer, length
+
+        nonlocal buffer
+        nonlocal length
 
         if buffer:
+
             result.append(
                 {
                     "kind": "text",
-                    "page": buffer[0].get("page"),
+                    "page": buffer[0].get(
+                        "page"
+                    ),
                     "text": "\n\n".join(
                         x["text"]
                         for x in buffer
@@ -392,40 +692,66 @@ def _chunk(
         buffer = []
         length = 0
 
-    for el in elements:
+    for element in elements:
 
-        text = el.get("text", "").strip()
-        kind = el.get("kind")
+        text = element.get(
+            "text",
+            "",
+        ).strip()
+
+        kind = element.get(
+            "kind"
+        )
 
         if not text:
             continue
 
-        # Tables and visuals are atomic.
-        if kind in {"table", "visual"}:
+        # ----------------------------------------------------
+        # TABLES AND VISUALS ARE ATOMIC
+        # ----------------------------------------------------
+
+        if kind in {
+            "table",
+            "visual",
+        }:
+
             flush()
 
             result.append(
                 {
                     "kind": kind,
-                    "page": el.get("page"),
+                    "page": element.get(
+                        "page"
+                    ),
                     "text": text,
                 }
             )
 
             continue
 
-        # Prevent normal text chunks from exceeding maximum size.
+        # ----------------------------------------------------
+        # NORMAL TEXT
+        # ----------------------------------------------------
+
         if (
             buffer
-            and length + len(text) + 2 > maximum
+            and length
+            + len(text)
+            + 2
+            > maximum
         ):
+
             flush()
 
-        buffer.append(el)
+        buffer.append(
+            element
+        )
 
-        length += len(text) + 2
+        length += (
+            len(text)
+            + 2
+        )
 
-        # Target chunk size reached.
         if length >= target:
             flush()
 
@@ -434,104 +760,178 @@ def _chunk(
     return result
 
 
-def _embed_index(
-    chunks,
-    index_path,
-    cb,
-    batch_size=32,
-):
-    import faiss
-    from sentence_transformers import SentenceTransformer
+# ============================================================
+# EMBEDDING MODEL
+# ============================================================
 
+def _load_embedding_model():
+
+    from sentence_transformers import (
+        SentenceTransformer,
+    )
+
+    # Explicit CPU prevents accidental GPU/CUDA usage.
     model = SentenceTransformer(
-        "BAAI/bge-m3"
+        EMBEDDING_MODEL_NAME,
+        device="cpu",
+    )
+
+    return model
+
+
+# ============================================================
+# FAISS INDEX CREATION
+# ============================================================
+
+def _embed_index(
+    chunks: list[dict[str, Any]],
+    index_path: Path,
+    cb: Progress,
+    batch_size: int = EMBEDDING_BATCH_SIZE,
+) -> None:
+
+    import faiss
+
+    if not chunks:
+        raise RuntimeError(
+            "No chunks available for embedding."
+        )
+
+    _progress(
+        cb,
+        0.61,
+        "Loading embedding model...",
+    )
+
+    model = _load_embedding_model()
+
+    _progress(
+        cb,
+        0.64,
+        "Embedding model loaded.",
     )
 
     index = None
 
-    for start in range(
-        0,
-        len(chunks),
-        batch_size,
-    ):
-        batch = chunks[
-            start:start + batch_size
-        ]
+    total = len(chunks)
 
-        vectors = model.encode(
-            [
-                x["text"]
-                for x in batch
-            ],
-            batch_size=min(
-                batch_size,
-                len(batch),
-            ),
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        ).astype("float32")
+    try:
 
-        if index is None:
-            index = faiss.IndexFlatIP(
-                vectors.shape[1]
+        for start in range(
+            0,
+            total,
+            batch_size,
+        ):
+
+            batch = chunks[
+                start:
+                start + batch_size
+            ]
+
+            texts = [
+                item["text"]
+                for item in batch
+            ]
+
+            vectors = model.encode(
+                texts,
+                batch_size=min(
+                    batch_size,
+                    len(texts),
+                ),
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            ).astype(
+                "float32"
             )
 
-        index.add(vectors)
+            if index is None:
 
-        del vectors
+                index = faiss.IndexFlatIP(
+                    vectors.shape[1]
+                )
+
+            index.add(
+                vectors
+            )
+
+            del vectors
+            del texts
+            gc.collect()
+
+            completed = (
+                start
+                + len(batch)
+            )
+
+            _progress(
+                cb,
+                0.64
+                + 0.16
+                * (
+                    completed
+                    / total
+                ),
+                f"Embedding chunks "
+                f"{completed}/{total}...",
+            )
+
+        if index is None:
+
+            raise RuntimeError(
+                "FAISS index was not created."
+            )
+
+        faiss.write_index(
+            index,
+            str(index_path),
+        )
+
+    finally:
+
+        del index
+        del model
         gc.collect()
 
-        _progress(
-            cb,
-            0.62
-            + 0.20
-            * (
-                (start + len(batch))
-                / len(chunks)
-            ),
-            f"Embedding chunks "
-            f"{start + len(batch)}/{len(chunks)}…",
-        )
 
-    if index is None:
-        raise RuntimeError(
-            "No chunks were produced."
-        )
-
-    faiss.write_index(
-        index,
-        str(index_path),
-    )
-
-    del index
-    del model
-    gc.collect()
-
+# ============================================================
+# BUILD / LOAD DOCUMENT
+# ============================================================
 
 def build_or_load_document(
-    pdf_bytes,
-    source_name,
-    document_id,
-    api_key,
-    visual_model,
-    progress_callback=None,
+    pdf_bytes: bytes,
+    source_name: str,
+    document_id: str,
+    api_key: str,
+    visual_model: str,
+    progress_callback: Progress = None,
 ):
-    # ---------------------------------
-    # Reuse existing processed document
-    # ---------------------------------
 
     existing = load_manifest(
         document_id
     )
 
+    index_path = (
+        _doc_dir(document_id)
+        / "index.faiss"
+    )
+
+    chunks_path = (
+        _doc_dir(document_id)
+        / "chunks.json"
+    )
+
+    # --------------------------------------------------------
+    # EXISTING INDEX
+    # --------------------------------------------------------
+
     if (
         existing
-        and (
-            _doc_dir(document_id)
-            / "index.faiss"
-        ).exists()
+        and index_path.exists()
+        and chunks_path.exists()
     ):
+
         _progress(
             progress_callback,
             1.0,
@@ -540,28 +940,36 @@ def build_or_load_document(
 
         return existing
 
-    # ---------------------------------
-    # Prepare document directory
-    # ---------------------------------
+    # --------------------------------------------------------
+    # CREATE DOCUMENT DIRECTORY
+    # --------------------------------------------------------
 
-    doc_dir = _doc_dir(document_id)
+    doc_dir = _doc_dir(
+        document_id
+    )
+
     doc_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    pdf_path = doc_dir / "source.pdf"
+    pdf_path = (
+        doc_dir
+        / "source.pdf"
+    )
 
-    pdf_path.write_bytes(pdf_bytes)
+    pdf_path.write_bytes(
+        pdf_bytes
+    )
 
-    # ---------------------------------
-    # Docling conversion
-    # ---------------------------------
+    # --------------------------------------------------------
+    # DOCLING
+    # --------------------------------------------------------
 
     _progress(
         progress_callback,
         0.03,
-        "Converting PDF with Docling…",
+        "Converting PDF with Docling...",
     )
 
     result = _convert_pdf(
@@ -571,6 +979,7 @@ def build_or_load_document(
     doc = result.document
 
     try:
+
         pages = len(
             getattr(
                 doc,
@@ -578,7 +987,9 @@ def build_or_load_document(
                 [],
             )
         )
+
     except Exception:
+
         pages = None
 
     _progress(
@@ -587,9 +998,9 @@ def build_or_load_document(
         "Docling extraction complete.",
     )
 
-    # ---------------------------------
-    # Visual description pass
-    # ---------------------------------
+    # --------------------------------------------------------
+    # VISUAL DESCRIPTION
+    # --------------------------------------------------------
 
     visual_descriptions = _visual_pass(
         doc,
@@ -598,14 +1009,14 @@ def build_or_load_document(
         progress_callback,
     )
 
-    # ---------------------------------
-    # Canonical document
-    # ---------------------------------
+    # --------------------------------------------------------
+    # CANONICAL STRUCTURE
+    # --------------------------------------------------------
 
     _progress(
         progress_callback,
         0.54,
-        "Building canonical structure…",
+        "Building canonical structure...",
     )
 
     elements = _canonical_elements(
@@ -616,36 +1027,34 @@ def build_or_load_document(
         visual_descriptions
     )
 
-    # ---------------------------------
-    # Release heavy Docling graph
-    # before embedding
-    # ---------------------------------
+    # --------------------------------------------------------
+    # RELEASE DOCLING OBJECTS
+    # --------------------------------------------------------
 
     del result
     del doc
     gc.collect()
 
-    # ---------------------------------
-    # Structure-aware chunking
-    # ---------------------------------
+    # --------------------------------------------------------
+    # CHUNKING
+    # --------------------------------------------------------
 
-    chunks = _chunk(elements)
+    chunks = _chunk(
+        elements
+    )
 
     del elements
     gc.collect()
 
     if not chunks:
+
         raise RuntimeError(
-            "No usable text/table/visual "
-            "content was extracted."
+            "No usable text, table, "
+            "or visual content was extracted."
         )
 
-    # ---------------------------------
-    # Save chunks
-    # ---------------------------------
-
     _atomic_json(
-        doc_dir / "chunks.json",
+        chunks_path,
         chunks,
     )
 
@@ -655,40 +1064,47 @@ def build_or_load_document(
         f"Prepared {len(chunks)} chunks.",
     )
 
-    # ---------------------------------
-    # Create FAISS index
-    # ---------------------------------
+    # --------------------------------------------------------
+    # EMBEDDING + FAISS
+    # --------------------------------------------------------
 
     _embed_index(
         chunks,
-        doc_dir / "index.faiss",
+        index_path,
         progress_callback,
+        batch_size=EMBEDDING_BATCH_SIZE,
     )
 
-    # ---------------------------------
-    # Manifest
-    # ---------------------------------
+    # --------------------------------------------------------
+    # MANIFEST
+    # --------------------------------------------------------
 
     manifest = {
         "document_id": document_id,
         "source_name": source_name,
         "pages": pages,
         "num_chunks": len(chunks),
-        "embedding_model": "BAAI/bge-m3",
-        "index_type": (
-            "FAISS IndexFlatIP + "
-            "normalized embeddings"
-        ),
-        "chunking": (
-            "target 1800 / max 3200; "
-            "tables and visuals atomic"
-        ),
-        "visual_descriptions": len(
-            visual_descriptions
-        ),
+
+        "embedding_model":
+            EMBEDDING_MODEL_NAME,
+
+        "index_type":
+            "FAISS IndexFlatIP + normalized embeddings",
+
+        "chunking":
+            f"target {CHUNK_TARGET} / "
+            f"max {CHUNK_MAXIMUM}; "
+            f"tables and visuals atomic",
+
+        "visual_descriptions":
+            len(visual_descriptions),
+
         "ocr": False,
+
         "table_structure": True,
+
         "picture_images": True,
+
         "notebook_aligned": True,
     }
 
@@ -697,12 +1113,9 @@ def build_or_load_document(
         manifest,
     )
 
-    # ---------------------------------
-    # Memory cleanup
-    # ---------------------------------
-
     del chunks
     del visual_descriptions
+
     gc.collect()
 
     _progress(
@@ -714,89 +1127,126 @@ def build_or_load_document(
     return manifest
 
 
+# ============================================================
+# RETRIEVAL
+# ============================================================
+
 def _retrieve(
-    document_id,
-    question,
-    top_k,
+    document_id: str,
+    question: str,
+    top_k: int = DEFAULT_TOP_K,
 ):
+
     import faiss
-    from sentence_transformers import SentenceTransformer
 
     doc_dir = _doc_dir(
         document_id
     )
 
+    chunks_path = (
+        doc_dir
+        / "chunks.json"
+    )
+
+    index_path = (
+        doc_dir
+        / "index.faiss"
+    )
+
+    if not chunks_path.exists():
+        raise FileNotFoundError(
+            "Chunk file not found."
+        )
+
+    if not index_path.exists():
+        raise FileNotFoundError(
+            "FAISS index not found."
+        )
+
     chunks = json.loads(
-        (
-            doc_dir
-            / "chunks.json"
-        ).read_text(
+        chunks_path.read_text(
             encoding="utf-8"
         )
     )
 
     index = faiss.read_index(
-        str(
-            doc_dir
-            / "index.faiss"
+        str(index_path)
+    )
+
+    if index.ntotal == 0:
+        return []
+
+    model = _load_embedding_model()
+
+    try:
+
+        query_vector = model.encode(
+            [question],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        ).astype(
+            "float32"
         )
-    )
 
-    model = SentenceTransformer(
-        "BAAI/bge-m3"
-    )
-
-    query_vector = model.encode(
-        [question],
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    ).astype("float32")
-
-    scores, ids = index.search(
-        query_vector,
-        min(
+        k = min(
             top_k,
             index.ntotal,
-        ),
-    )
+        )
 
-    results = []
+        scores, ids = index.search(
+            query_vector,
+            k,
+        )
 
-    for score, idx in zip(
-        scores[0],
-        ids[0],
-    ):
-        if (
-            0 <= idx
-            < len(chunks)
+        results = []
+
+        for score, idx in zip(
+            scores[0],
+            ids[0],
         ):
-            item = dict(
-                chunks[int(idx)]
-            )
 
-            item["score"] = float(
-                score
-            )
+            if (
+                0 <= idx
+                < len(chunks)
+            ):
 
-            results.append(item)
+                item = dict(
+                    chunks[int(idx)]
+                )
 
-    del query_vector
-    del model
-    del index
-    del chunks
+                item["score"] = float(
+                    score
+                )
 
-    gc.collect()
+                results.append(
+                    item
+                )
 
-    return results
+        return results
 
+    finally:
+
+        del model
+        del index
+
+        if "query_vector" in locals():
+            del query_vector
+
+        gc.collect()
+
+
+# ============================================================
+# ANSWER GENERATION
+# ============================================================
 
 def _answer(
-    question,
-    context,
-    api_key,
-    model_name,
-):
+    question: str,
+    context: str,
+    api_key: str,
+    model_name: str,
+) -> str:
+
     from google import genai
 
     client = genai.Client(
@@ -804,26 +1254,36 @@ def _answer(
     )
 
     prompt = f"""
-Answer using ONLY the retrieved PDF context below.
+You are a document question-answering assistant.
 
-Do not use outside knowledge.
+Answer the QUESTION using ONLY the
+RETRIEVED PDF CONTEXT.
 
-If the context is insufficient, say so.
+Rules:
 
-Preserve numbers, dates, units, names
-and table relationships exactly.
-
-Use visual descriptions only for
-explicitly visible information.
+1. Do not use outside knowledge.
+2. Do not invent information.
+3. If the retrieved context is insufficient,
+   clearly say that the information is not
+   available in the retrieved context.
+4. Preserve exact numbers.
+5. Preserve dates.
+6. Preserve units.
+7. Preserve names.
+8. Preserve table relationships.
+9. Do not change numerical values.
+10. Use visual descriptions only for information
+    explicitly visible in the visual.
+11. Mention page numbers when useful.
+12. Give a concise direct answer.
 
 QUESTION:
+
 {question}
 
-RETRIEVED CONTEXT:
-{context}
+RETRIEVED PDF CONTEXT:
 
-Give a concise direct answer and mention
-page numbers when useful.
+{context}
 """
 
     response = client.models.generate_content(
@@ -836,16 +1296,32 @@ page numbers when useful.
     ).strip()
 
 
+# ============================================================
+# PUBLIC QA FUNCTION
+# ============================================================
+
 def answer_question(
-    document_id,
-    question,
-    api_key,
-    answer_model,
-    top_k=5,
+    document_id: str,
+    question: str,
+    api_key: str,
+    answer_model: str,
+    top_k: int = DEFAULT_TOP_K,
 ):
+
     if not api_key:
+
         raise ValueError(
             "Gemini API key is required."
+        )
+
+    question = (
+        question or ""
+    ).strip()
+
+    if not question:
+
+        raise ValueError(
+            "Question cannot be empty."
         )
 
     results = _retrieve(
@@ -854,22 +1330,33 @@ def answer_question(
         top_k,
     )
 
-    context = "\n\n---\n\n".join(
-        f"[Page {r.get('page', '?')} "
-        f"| {r.get('kind')} "
-        f"| score {r['score']:.4f}]\n"
-        f"{r['text']}"
-        for r in results
-    )
+    if not results:
 
-    sources = [
-        {
-            "page": r.get("page"),
-            "kind": r.get("kind"),
-            "score": r["score"],
+        return {
+            "answer":
+                "No relevant information "
+                "was retrieved from the document.",
+            "sources": [],
         }
-        for r in results
-    ]
+
+    context_parts = []
+
+    for result in results:
+
+        context_parts.append(
+            f"""
+[Page {result.get('page', '?')}
+ | {result.get('kind')}
+ | similarity {result['score']:.4f}]
+
+{result['text']}
+""".strip()
+        )
+
+    context = (
+        "\n\n---\n\n"
+        .join(context_parts)
+    )
 
     answer = _answer(
         question,
@@ -877,6 +1364,21 @@ def answer_question(
         api_key,
         answer_model,
     )
+
+    sources = [
+        {
+            "page":
+                result.get("page"),
+
+            "kind":
+                result.get("kind"),
+
+            "score":
+                result["score"],
+        }
+
+        for result in results
+    ]
 
     del results
     gc.collect()
