@@ -14,7 +14,10 @@ from typing import Any, Callable
 # ============================================================
 
 INDEX_ROOT = Path(
-    os.getenv("RAG_INDEX_ROOT", "storage")
+    os.getenv(
+        "RAG_INDEX_ROOT",
+        "storage",
+    )
 )
 
 INDEX_ROOT.mkdir(
@@ -22,10 +25,24 @@ INDEX_ROOT.mkdir(
     exist_ok=True,
 )
 
+
+# ------------------------------------------------------------
+# EMBEDDING MODEL
+#
+# BGE-M3 remains the default because this is the model used
+# in the validated project pipeline.
+#
+# It can be overridden through:
+#
+# EMBEDDING_MODEL=BAAI/bge-m3
+#
+# ------------------------------------------------------------
+
 EMBEDDING_MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
     "BAAI/bge-m3",
-)
+).strip()
+
 
 EMBEDDING_BATCH_SIZE = max(
     1,
@@ -37,6 +54,7 @@ EMBEDDING_BATCH_SIZE = max(
     ),
 )
 
+
 DEFAULT_TOP_K = max(
     1,
     int(
@@ -47,6 +65,7 @@ DEFAULT_TOP_K = max(
     ),
 )
 
+
 CHUNK_TARGET = int(
     os.getenv(
         "CHUNK_TARGET",
@@ -54,11 +73,40 @@ CHUNK_TARGET = int(
     )
 )
 
+
 CHUNK_MAXIMUM = int(
     os.getenv(
         "CHUNK_MAXIMUM",
         "3200",
     )
+)
+
+
+# ------------------------------------------------------------
+# CPU MEMORY / THREAD CONTROL
+# ------------------------------------------------------------
+
+# These do not change the RAG architecture.
+# They reduce unnecessary CPU-side resource pressure.
+
+os.environ.setdefault(
+    "TOKENIZERS_PARALLELISM",
+    "false",
+)
+
+os.environ.setdefault(
+    "OMP_NUM_THREADS",
+    "1",
+)
+
+os.environ.setdefault(
+    "MKL_NUM_THREADS",
+    "1",
+)
+
+os.environ.setdefault(
+    "OPENBLAS_NUM_THREADS",
+    "1",
 )
 
 
@@ -72,10 +120,12 @@ Progress = Callable[
 # LOGGING / PROGRESS
 # ============================================================
 
-def _log(message: str) -> None:
+def _log(
+    message: str,
+) -> None:
     """
-    Flush immediately so Streamlit Cloud logs show the
-    exact stage before a possible native crash / OOM kill.
+    Flush immediately so Streamlit Cloud logs show the exact
+    stage before a possible native crash / OOM termination.
     """
 
     print(
@@ -99,6 +149,60 @@ def _progress(
     _log(
         f"[RAG] {message}"
     )
+
+
+# ============================================================
+# MEMORY CLEANUP
+# ============================================================
+
+def _cleanup_memory() -> None:
+
+    gc.collect()
+
+
+def _log_torch_environment() -> None:
+    """
+    Diagnostic information for deployment debugging.
+
+    This is deliberately called immediately before loading
+    the embedding model.
+    """
+
+    try:
+
+        import torch
+
+        _log(
+            ">>> TORCH: "
+            f"version={torch.__version__}"
+        )
+
+        _log(
+            ">>> TORCH: "
+            f"cuda_available={torch.cuda.is_available()}"
+        )
+
+        _log(
+            ">>> TORCH: "
+            f"cuda_version={torch.version.cuda}"
+        )
+
+        try:
+
+            _log(
+                ">>> TORCH: "
+                f"threads={torch.get_num_threads()}"
+            )
+
+        except Exception:
+            pass
+
+    except Exception as exc:
+
+        _log(
+            ">>> TORCH: environment check failed: "
+            f"{exc}"
+        )
 
 
 # ============================================================
@@ -128,7 +232,7 @@ def load_manifest(
 
         return json.loads(
             path.read_text(
-                encoding="utf-8"
+                encoding="utf-8",
             )
         )
 
@@ -158,12 +262,9 @@ def _atomic_json(
         encoding="utf-8",
     )
 
-    tmp.replace(path)
-
-
-def _cleanup_memory() -> None:
-
-    gc.collect()
+    tmp.replace(
+        path
+    )
 
 
 # ============================================================
@@ -187,16 +288,18 @@ def _iter_collection(
             continue
 
         try:
+
             return list(value)
 
         except TypeError:
+
             continue
 
         except Exception as exc:
 
             _log(
-                f"[RAG] Could not read "
-                f"Docling collection '{name}': {exc}"
+                f"[RAG] Could not read Docling "
+                f"collection '{name}': {exc}"
             )
 
     return []
@@ -205,6 +308,16 @@ def _iter_collection(
 def _page(
     obj: Any,
 ) -> int | None:
+    """
+    Extract page number from different Docling object forms.
+
+    Docling versions may expose page information differently,
+    so this helper intentionally checks several possibilities.
+    """
+
+    # --------------------------------------------------------
+    # Direct attributes
+    # --------------------------------------------------------
 
     for name in (
         "page_no",
@@ -222,10 +335,75 @@ def _page(
             continue
 
         try:
-            return int(value)
+
+            if hasattr(
+                value,
+                "page_no",
+            ):
+
+                value = value.page_no
+
+            return int(
+                value
+            )
 
         except Exception:
             continue
+
+    # --------------------------------------------------------
+    # Provenance
+    # --------------------------------------------------------
+
+    provenance = getattr(
+        obj,
+        "prov",
+        None,
+    )
+
+    if provenance is None:
+
+        provenance = getattr(
+            obj,
+            "provenance",
+            None,
+        )
+
+    if provenance is not None:
+
+        try:
+
+            prov_list = list(
+                provenance
+            )
+
+            for prov in prov_list:
+
+                for name in (
+                    "page_no",
+                    "page",
+                    "page_number",
+                ):
+
+                    value = getattr(
+                        prov,
+                        name,
+                        None,
+                    )
+
+                    if value is None:
+                        continue
+
+                    try:
+
+                        return int(
+                            value
+                        )
+
+                    except Exception:
+                        continue
+
+        except Exception:
+            pass
 
     return None
 
@@ -247,7 +425,10 @@ def _text(
         )
 
         if (
-            isinstance(value, str)
+            isinstance(
+                value,
+                str,
+            )
             and value.strip()
         ):
 
@@ -294,7 +475,7 @@ def _convert_pdf(
     options.do_ocr = False
 
     # --------------------------------------------------------
-    # TABLE STRUCTURE IS REQUIRED
+    # TABLE STRUCTURE REQUIRED
     # --------------------------------------------------------
 
     options.do_table_structure = True
@@ -330,7 +511,10 @@ def _convert_pdf(
         ">>> STAGE 5: Docling conversion COMPLETE"
     )
 
+    # --------------------------------------------------------
     # Release converter immediately.
+    # --------------------------------------------------------
+
     del converter
     del options
 
@@ -370,7 +554,9 @@ def _find_visual_labels(
 
     for item in items:
 
-        text = _text(item)
+        text = _text(
+            item
+        )
 
         if not text:
             continue
@@ -393,6 +579,14 @@ def _find_visual_labels(
         f"{len(labels)} visual labels"
     )
 
+    for label in labels:
+
+        _log(
+            ">>> VISUAL LABEL: "
+            f"page={label.get('page')} "
+            f"text={label.get('label')[:150]}"
+        )
+
     return labels
 
 
@@ -411,6 +605,11 @@ def _selected_pictures(
         ],
     )
 
+    _log(
+        f">>> VISUAL: Docling pictures found = "
+        f"{len(pictures)}"
+    )
+
     pages = {
         item["page"]
         for item in labels
@@ -420,10 +619,21 @@ def _selected_pictures(
     if not pages:
 
         _log(
-            ">>> VISUAL: No visual pages detected"
+            ">>> VISUAL: No visual pages detected "
+            "from label provenance"
         )
 
+        # ----------------------------------------------------
+        # We deliberately do NOT send every picture to Gemini.
+        # That could become extremely expensive on a large PDF.
+        # ----------------------------------------------------
+
         return []
+
+    _log(
+        f">>> VISUAL: Candidate visual pages = "
+        f"{sorted(pages)}"
+    )
 
     selected = []
 
@@ -455,12 +665,15 @@ def _picture_image(
     doc: Any,
 ):
 
-    if hasattr(
+    getter = getattr(
         picture,
         "get_image",
-    ):
+        None,
+    )
 
-        return picture.get_image(
+    if callable(getter):
+
+        return getter(
             doc
         )
 
@@ -612,7 +825,10 @@ def _visual_pass(
             + 0.17
             * (
                 (i - 1)
-                / max(1, total)
+                / max(
+                    1,
+                    total,
+                )
             ),
             f"Describing visual "
             f"{i}/{total}...",
@@ -630,8 +846,8 @@ def _visual_pass(
             if image is None:
 
                 _log(
-                    f">>> VISUAL: No image "
-                    f"available for page {page}"
+                    f">>> VISUAL: No image available "
+                    f"for page {page}"
                 )
 
                 continue
@@ -670,16 +886,26 @@ def _visual_pass(
             try:
 
                 if image is not None:
-                    image.close()
+
+                    close_fn = getattr(
+                        image,
+                        "close",
+                        None,
+                    )
+
+                    if callable(close_fn):
+                        close_fn()
 
             except Exception:
                 pass
 
-            del image
+            image = None
 
             _cleanup_memory()
 
     del client
+
+    _cleanup_memory()
 
     _progress(
         cb,
@@ -770,7 +996,10 @@ def _table_text(
             )
 
             if value:
-                return str(value)
+
+                return str(
+                    value
+                )
 
         except TypeError:
 
@@ -781,6 +1010,7 @@ def _table_text(
                 )
 
                 if value:
+
                     return str(
                         value
                     )
@@ -788,15 +1018,17 @@ def _table_text(
             except Exception as exc:
 
                 _log(
-                    f"[RAG] Table markdown "
-                    f"fallback failed: {exc}"
+                    "[RAG] Table markdown "
+                    "fallback failed: "
+                    f"{exc}"
                 )
 
         except Exception as exc:
 
             _log(
-                f"[RAG] Table markdown "
-                f"export failed: {exc}"
+                "[RAG] Table markdown "
+                "export failed: "
+                f"{exc}"
             )
 
     fn = getattr(
@@ -812,7 +1044,10 @@ def _table_text(
             value = fn()
 
             if value:
-                return str(value)
+
+                return str(
+                    value
+                )
 
         except Exception as exc:
 
@@ -892,9 +1127,6 @@ def _canonical_elements(
 
     # --------------------------------------------------------
     # SORT BY PAGE
-    #
-    # This is important because we later merge visual
-    # descriptions into the same page context.
     # --------------------------------------------------------
 
     elements.sort(
@@ -981,8 +1213,10 @@ def _chunk(
         ).strip()
 
         if not text:
+
             buffer = []
             length = 0
+
             return
 
         pages = [
@@ -1011,16 +1245,28 @@ def _chunk(
 
         result.append(
             {
-                "chunk_id": chunk_id,
-                "page_start": page_start,
-                "page_end": page_end,
-                "kind": "text",
-                "text": text,
+                "chunk_id":
+                    chunk_id,
+
+                "page_start":
+                    page_start,
+
+                "page_end":
+                    page_end,
+
+                "kind":
+                    "text",
+
+                "text":
+                    text,
+
                 "element_types":
                     element_types,
+
                 "has_table":
                     "table"
                     in element_types,
+
                 "has_visual":
                     "visual"
                     in element_types,
@@ -1030,6 +1276,7 @@ def _chunk(
         chunk_id += 1
 
         buffer = []
+
         length = 0
 
     for element in elements:
@@ -1062,21 +1309,31 @@ def _chunk(
 
             result.append(
                 {
-                    "chunk_id": chunk_id,
+                    "chunk_id":
+                        chunk_id,
+
                     "page_start":
                         element.get(
                             "page"
                         ),
+
                     "page_end":
                         element.get(
                             "page"
                         ),
-                    "kind": kind,
-                    "text": text,
+
+                    "kind":
+                        kind,
+
+                    "text":
+                        text,
+
                     "element_types":
                         [kind],
+
                     "has_table":
                         kind == "table",
+
                     "has_visual":
                         kind == "visual",
                 }
@@ -1133,20 +1390,134 @@ def _chunk(
 def _load_embedding_model():
 
     _log(
-        ">>> EMBEDDING: Loading BGE-M3 on CPU"
+        "================================================"
+    )
+
+    _log(
+        ">>> EMBEDDING: Starting model load"
+    )
+
+    _log(
+        f">>> EMBEDDING: Model = "
+        f"{EMBEDDING_MODEL_NAME}"
+    )
+
+    _log(
+        ">>> EMBEDDING: Device = CPU"
+    )
+
+    # --------------------------------------------------------
+    # Torch diagnostic
+    # --------------------------------------------------------
+
+    _log_torch_environment()
+
+    # --------------------------------------------------------
+    # Import
+    # --------------------------------------------------------
+
+    _log(
+        ">>> EMBEDDING: Importing "
+        "SentenceTransformer"
     )
 
     from sentence_transformers import (
         SentenceTransformer,
     )
 
-    model = SentenceTransformer(
-        EMBEDDING_MODEL_NAME,
-        device="cpu",
-    )
+    # --------------------------------------------------------
+    # Configure torch threads
+    # --------------------------------------------------------
+
+    try:
+
+        import torch
+
+        torch.set_num_threads(
+            max(
+                1,
+                int(
+                    os.getenv(
+                        "TORCH_NUM_THREADS",
+                        "1",
+                    )
+                ),
+            )
+        )
+
+        try:
+
+            torch.set_num_interop_threads(
+                1
+            )
+
+        except Exception:
+            pass
+
+    except Exception as exc:
+
+        _log(
+            ">>> EMBEDDING: Torch thread "
+            f"configuration skipped: {exc}"
+        )
+
+    _cleanup_memory()
+
+    # --------------------------------------------------------
+    # IMPORTANT
+    #
+    # low_cpu_mem_usage reduces the peak memory required
+    # while constructing the model.
+    #
+    # This does NOT magically make BGE-M3 a small model.
+    # It simply prevents avoidable duplicate model copies
+    # during loading.
+    # --------------------------------------------------------
 
     _log(
-        ">>> EMBEDDING: BGE-M3 loaded"
+        ">>> EMBEDDING: Constructing "
+        "SentenceTransformer"
+    )
+
+    model_kwargs = {
+        "low_cpu_mem_usage": True,
+    }
+
+    try:
+
+        model = SentenceTransformer(
+            EMBEDDING_MODEL_NAME,
+            device="cpu",
+            model_kwargs=model_kwargs,
+        )
+
+    except TypeError as exc:
+
+        # ----------------------------------------------------
+        # Compatibility fallback for older versions of
+        # sentence-transformers that do not accept the
+        # low_cpu_mem_usage argument.
+        # ----------------------------------------------------
+
+        _log(
+            ">>> EMBEDDING: "
+            "low_cpu_mem_usage unsupported; "
+            "retrying standard CPU load"
+        )
+
+        _log(
+            f">>> EMBEDDING: Initial error = {exc}"
+        )
+
+        _cleanup_memory()
+
+        model = SentenceTransformer(
+            EMBEDDING_MODEL_NAME,
+            device="cpu",
+        )
+
+    _log(
+        ">>> EMBEDDING: Model successfully loaded"
     )
 
     return model
@@ -1172,8 +1543,9 @@ def _embed_index(
         )
 
     _log(
-        f">>> EMBEDDING: About to load BGE-M3"
-        f" for {len(chunks)} chunks"
+        f">>> EMBEDDING: About to load "
+        f"{EMBEDDING_MODEL_NAME} "
+        f"for {len(chunks)} chunks"
     )
 
     import faiss
@@ -1188,6 +1560,10 @@ def _embed_index(
             0.61,
             "Loading embedding model...",
         )
+
+        # ----------------------------------------------------
+        # MODEL LOAD
+        # ----------------------------------------------------
 
         model = _load_embedding_model()
 
@@ -1205,6 +1581,10 @@ def _embed_index(
             f">>> EMBEDDING: Starting batches "
             f"batch_size={batch_size}"
         )
+
+        # ----------------------------------------------------
+        # EMBEDDING
+        # ----------------------------------------------------
 
         for start in range(
             0,
@@ -1286,6 +1666,10 @@ def _embed_index(
                 "FAISS index was not created."
             )
 
+        # ----------------------------------------------------
+        # SAVE INDEX
+        # ----------------------------------------------------
+
         _log(
             f">>> FAISS: Writing index "
             f"with {index.ntotal} vectors"
@@ -1303,9 +1687,11 @@ def _embed_index(
     finally:
 
         if index is not None:
+
             del index
 
         if model is not None:
+
             del model
 
         _cleanup_memory()
@@ -1675,6 +2061,10 @@ def _retrieve(
         / "index.faiss"
     )
 
+    manifest = load_manifest(
+        document_id
+    )
+
     if not chunks_path.exists():
 
         raise FileNotFoundError(
@@ -1711,11 +2101,55 @@ def _retrieve(
 
     try:
 
-        _log(
-            ">>> RETRIEVAL: Loading BGE-M3"
-        )
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # Retrieval MUST use the same embedding model that
+        # created the FAISS index.
+        # ----------------------------------------------------
 
-        model = _load_embedding_model()
+        retrieval_model = EMBEDDING_MODEL_NAME
+
+        if manifest:
+
+            stored_model = manifest.get(
+                "embedding_model"
+            )
+
+            if stored_model:
+
+                retrieval_model = stored_model
+
+        if retrieval_model != EMBEDDING_MODEL_NAME:
+
+            _log(
+                ">>> RETRIEVAL: Manifest model differs "
+                f"from configured model. "
+                f"Using manifest model: {retrieval_model}"
+            )
+
+            # Temporarily load the exact model recorded
+            # in the manifest.
+            from sentence_transformers import (
+                SentenceTransformer,
+            )
+
+            model = SentenceTransformer(
+                retrieval_model,
+                device="cpu",
+                model_kwargs={
+                    "low_cpu_mem_usage": True,
+                },
+            )
+
+        else:
+
+            _log(
+                ">>> RETRIEVAL: Loading "
+                f"{EMBEDDING_MODEL_NAME}"
+            )
+
+            model = _load_embedding_model()
 
         _log(
             ">>> RETRIEVAL: Encoding query"
@@ -1723,6 +2157,7 @@ def _retrieve(
 
         query_vector = model.encode(
             [question],
+            batch_size=1,
             normalize_embeddings=True,
             convert_to_numpy=True,
             show_progress_bar=False,
@@ -1776,11 +2211,13 @@ def _retrieve(
     finally:
 
         if model is not None:
+
             del model
 
         del index
 
         if query_vector is not None:
+
             del query_vector
 
         del chunks
@@ -1842,16 +2279,22 @@ RETRIEVED PDF CONTEXT:
 {context}
 """
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-    )
+    try:
 
-    del client
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
 
-    return (
-        response.text or ""
-    ).strip()
+        return (
+            response.text or ""
+        ).strip()
+
+    finally:
+
+        del client
+
+        _cleanup_memory()
 
 
 # ============================================================
@@ -1898,18 +2341,36 @@ def answer_question(
             "answer":
                 "No relevant information "
                 "was retrieved from the document.",
-            "sources": [],
+
+            "sources":
+                [],
         }
 
     context_parts = []
 
     for result in results:
 
+        page_start = result.get(
+            "page_start",
+            result.get(
+                "page",
+                "?",
+            ),
+        )
+
+        page_end = result.get(
+            "page_end",
+            result.get(
+                "page",
+                "?",
+            ),
+        )
+
         context_parts.append(
             f"""
-[Pages {result.get('page_start', result.get('page', '?'))}
+[Pages {page_start}
 -
-{result.get('page_end', result.get('page', '?'))}
+{page_end}
  | {result.get('kind')}
  | similarity {result['score']:.4f}]
 
@@ -1936,17 +2397,23 @@ def answer_question(
             "page_start":
                 result.get(
                     "page_start",
-                    result.get("page"),
+                    result.get(
+                        "page"
+                    ),
                 ),
 
             "page_end":
                 result.get(
                     "page_end",
-                    result.get("page"),
+                    result.get(
+                        "page"
+                    ),
                 ),
 
             "kind":
-                result.get("kind"),
+                result.get(
+                    "kind"
+                ),
 
             "score":
                 result["score"],
@@ -1956,6 +2423,8 @@ def answer_question(
     ]
 
     del results
+    del context_parts
+    del context
 
     _cleanup_memory()
 
