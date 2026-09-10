@@ -82,6 +82,52 @@ CHUNK_MAXIMUM = int(
 )
 
 
+# ============================================================
+# GEMINI CONFIGURATION
+# ============================================================
+#
+# IMPORTANT:
+#
+# The same fallback sequence is used for:
+#
+# 1. Visual / chart description
+# 2. Final RAG answer generation
+#
+# If a model is unavailable for the current API key/project,
+# the next model is attempted automatically.
+#
+# ============================================================
+
+GEMINI_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.7-flash",
+]
+
+
+# Timeout for EACH individual Gemini model attempt.
+#
+# 30 seconds means:
+#
+# Model 1 -> maximum approximately 30 sec
+# Model 2 -> maximum approximately 30 sec
+# Model 3 -> maximum approximately 30 sec
+# Model 4 -> maximum approximately 30 sec
+#
+# The fallback does NOT wait indefinitely.
+#
+GEMINI_TIMEOUT_SECONDS = max(
+    5,
+    int(
+        os.getenv(
+            "GEMINI_TIMEOUT_SECONDS",
+            "30",
+        )
+    ),
+)
+
+
 # ------------------------------------------------------------
 # CPU MEMORY / THREAD CONTROL
 # ------------------------------------------------------------
@@ -693,9 +739,147 @@ def _create_gemini_client(
 ):
 
     from google import genai
+    from google.genai import types
+
+    # --------------------------------------------------------
+    # google-genai HttpOptions.timeout is specified in
+    # milliseconds.
+    # --------------------------------------------------------
+
+    timeout_ms = (
+        GEMINI_TIMEOUT_SECONDS
+        * 1000
+    )
+
+    _log(
+        ">>> GEMINI: Creating client "
+        f"timeout={GEMINI_TIMEOUT_SECONDS}s"
+    )
 
     return genai.Client(
-        api_key=api_key
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=timeout_ms,
+        ),
+    )
+
+
+# ============================================================
+# GEMINI FALLBACK GENERATOR
+# ============================================================
+
+def _generate_with_fallback(
+    client: Any,
+    contents: Any,
+    stage: str,
+) -> tuple[str, str]:
+
+    """
+    Try the configured Gemini models in order.
+
+    Model order:
+
+        1. gemini-3.5-flash-lite
+        2. gemini-3.1-flash-lite
+        3. gemini-3.5-flash
+        4. gemini-3.7-flash
+
+    Each model receives its own timeout.
+
+    Returns:
+
+        (response_text, model_name)
+
+    Raises RuntimeError if every model fails.
+    """
+
+    last_error: Exception | None = None
+
+    total_models = len(
+        GEMINI_MODELS
+    )
+
+    for attempt, model_name in enumerate(
+        GEMINI_MODELS,
+        start=1,
+    ):
+
+        _log(
+            f">>> {stage}: Trying Gemini "
+            f"{attempt}/{total_models}: "
+            f"{model_name}"
+        )
+
+        try:
+
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+            )
+
+            text = (
+                getattr(
+                    response,
+                    "text",
+                    None,
+                )
+                or ""
+            ).strip()
+
+            if not text:
+
+                raise RuntimeError(
+                    "Gemini returned an empty response."
+                )
+
+            _log(
+                f">>> {stage}: SUCCESS using "
+                f"{model_name}"
+            )
+
+            return (
+                text,
+                model_name,
+            )
+
+        except Exception as exc:
+
+            last_error = exc
+
+            error_text = str(
+                exc
+            )
+
+            _log(
+                f">>> {stage}: FAILED "
+                f"model={model_name}"
+            )
+
+            _log(
+                f">>> {stage}: Error = "
+                f"{error_text}"
+            )
+
+            # ------------------------------------------------
+            # Continue automatically to the next model.
+            # ------------------------------------------------
+
+            if attempt < total_models:
+
+                _log(
+                    f">>> {stage}: Falling back "
+                    f"to next Gemini model"
+                )
+
+                continue
+
+            _log(
+                f">>> {stage}: ALL Gemini models failed"
+            )
+
+    raise RuntimeError(
+        "All configured Gemini models failed. "
+        f"Last error: {last_error}"
     )
 
 
@@ -708,7 +892,7 @@ def _gemini_describe(
     image: Any,
     model_name: str,
     page: int | None,
-) -> str:
+) -> tuple[str, str]:
 
     prompt = f"""
 Describe ONLY the visible information in this
@@ -744,17 +928,22 @@ Rules:
 Return concise factual prose.
 """
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[
+    # --------------------------------------------------------
+    # model_name is retained in the function signature so the
+    # existing application remains compatible.
+    #
+    # The actual fallback sequence is controlled centrally by
+    # GEMINI_MODELS.
+    # --------------------------------------------------------
+
+    return _generate_with_fallback(
+        client,
+        [
             prompt,
             image,
         ],
+        stage=f"VISUAL page={page}",
     )
-
-    return (
-        response.text or ""
-    ).strip()
 
 
 def _visual_pass(
@@ -852,7 +1041,7 @@ def _visual_pass(
 
                 continue
 
-            text = _gemini_describe(
+            text, used_model = _gemini_describe(
                 client,
                 image,
                 model_name,
@@ -861,7 +1050,8 @@ def _visual_pass(
 
             _log(
                 f">>> VISUAL: Gemini description "
-                f"complete for page {page}"
+                f"complete for page {page} "
+                f"using {used_model}"
             )
 
             if text:
@@ -875,6 +1065,16 @@ def _visual_pass(
                 )
 
         except Exception as exc:
+
+            # ------------------------------------------------
+            # IMPORTANT:
+            #
+            # A failed visual must NOT stop the entire PDF
+            # processing pipeline.
+            #
+            # All Gemini fallback models have already been
+            # attempted inside _generate_with_fallback().
+            # ------------------------------------------------
 
             _log(
                 f">>> VISUAL ERROR: page "
@@ -2005,6 +2205,12 @@ def build_or_load_document(
 
         "embedding_batch_size":
             EMBEDDING_BATCH_SIZE,
+
+        "gemini_models":
+            GEMINI_MODELS,
+
+        "gemini_timeout_seconds":
+            GEMINI_TIMEOUT_SECONDS,
     }
 
     _atomic_json(
@@ -2234,7 +2440,7 @@ def _answer(
     context: str,
     api_key: str,
     model_name: str,
-) -> str:
+) -> tuple[str, str]:
 
     if not api_key:
 
@@ -2281,14 +2487,25 @@ RETRIEVED PDF CONTEXT:
 
     try:
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
+        # ----------------------------------------------------
+        # Same Gemini fallback logic as visual descriptions.
+        # ----------------------------------------------------
+
+        answer, used_model = _generate_with_fallback(
+            client,
+            prompt,
+            stage="ANSWER",
+        )
+
+        _log(
+            f">>> ANSWER: Generated using "
+            f"{used_model}"
         )
 
         return (
-            response.text or ""
-        ).strip()
+            answer,
+            used_model,
+        )
 
     finally:
 
@@ -2385,12 +2602,34 @@ def answer_question(
         )
     )
 
-    answer = _answer(
-        question,
-        context,
-        api_key,
-        answer_model,
-    )
+    try:
+
+        answer, used_model = _answer(
+            question,
+            context,
+            api_key,
+            answer_model,
+        )
+
+    except Exception as exc:
+
+        # ----------------------------------------------------
+        # Controlled error for Streamlit.
+        # The actual fallback attempts and their errors have
+        # already been logged by _generate_with_fallback().
+        # ----------------------------------------------------
+
+        _log(
+            f">>> QA ERROR: {exc}"
+        )
+
+        answer = (
+            "I could not generate an answer because "
+            "all configured Gemini models failed. "
+            "Please try again."
+        )
+
+        used_model = None
 
     sources = [
         {
@@ -2431,6 +2670,13 @@ def answer_question(
     _log(
         ">>> QA: Answer generated"
     )
+
+    if used_model:
+
+        _log(
+            f">>> QA: Gemini model used = "
+            f"{used_model}"
+        )
 
     return {
         "answer":
