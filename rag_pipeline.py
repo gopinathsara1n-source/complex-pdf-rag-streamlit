@@ -297,18 +297,26 @@ def _clean_text(text):
     )
 
 
-def _table_text(table):
-    for method in (
-        "export_to_markdown",
-        "to_markdown",
-    ):
-        fn = getattr(table, method, None)
+def _table_text(table, doc):
+    fn = getattr(table, "export_to_markdown", None)
 
-        if callable(fn):
+    if callable(fn):
+        try:
+            return fn(doc=doc)
+        except TypeError:
             try:
-                return fn()
+                return fn(doc)
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    fn = getattr(table, "to_markdown", None)
+    if callable(fn):
+        try:
+            return fn()
+        except Exception:
+            pass
 
     return str(table)
 
@@ -343,8 +351,7 @@ def _canonical_elements(doc):
         doc,
         ["tables", "table_items"],
     ):
-        txt = _table_text(table).strip()
-
+        txt = _table_text(table, doc).strip()
         if txt:
             elements.append(
                 {
