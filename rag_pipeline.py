@@ -67,8 +67,7 @@ def _convert_pdf(pdf_path):
     opts = PdfPipelineOptions()
     opts.do_table_structure = True
     opts.generate_picture_images = True
-    opts.generate_picture_descriptions = False
-
+   
     converter = DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(pipeline_options=opts)
