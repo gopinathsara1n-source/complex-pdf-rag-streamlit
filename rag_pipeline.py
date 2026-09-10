@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,17 +27,18 @@ INDEX_ROOT.mkdir(
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # EMBEDDING MODEL
+# ============================================================
 #
-# BGE-M3 remains the default because this is the model used
-# in the validated project pipeline.
+# BGE-M3 remains the default model because this is the
+# validated project embedding model.
 #
 # It can be overridden through:
 #
 # EMBEDDING_MODEL=BAAI/bge-m3
 #
-# ------------------------------------------------------------
+# ============================================================
 
 EMBEDDING_MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
@@ -44,12 +46,43 @@ EMBEDDING_MODEL_NAME = os.getenv(
 ).strip()
 
 
+# ------------------------------------------------------------
+# Embedding batch size
+#
+# Keep this small on Streamlit Cloud.
+#
+# BGE-M3 is a large model and CPU memory is limited.
+# ------------------------------------------------------------
+
 EMBEDDING_BATCH_SIZE = max(
     1,
     int(
         os.getenv(
             "EMBEDDING_BATCH_SIZE",
-            "4",
+            "2",
+        )
+    ),
+)
+
+
+# ------------------------------------------------------------
+# Maximum sequence length used by SentenceTransformer.
+#
+# This does NOT change the RAG architecture.
+#
+# It limits unnecessary memory usage during inference.
+#
+# BGE-M3 supports long context, but most retrieved/document
+# chunks in this project do not need an extremely large
+# sequence length.
+# ------------------------------------------------------------
+
+EMBEDDING_MAX_SEQ_LENGTH = max(
+    128,
+    int(
+        os.getenv(
+            "EMBEDDING_MAX_SEQ_LENGTH",
+            "512",
         )
     ),
 )
@@ -86,15 +119,10 @@ CHUNK_MAXIMUM = int(
 # GEMINI CONFIGURATION
 # ============================================================
 #
-# IMPORTANT:
-#
-# The same fallback sequence is used for:
+# Same fallback sequence is used for:
 #
 # 1. Visual / chart description
-# 2. Final RAG answer generation
-#
-# If a model is unavailable for the current API key/project,
-# the next model is attempted automatically.
+# 2. Final RAG answer
 #
 # ============================================================
 
@@ -106,17 +134,6 @@ GEMINI_MODELS = [
 ]
 
 
-# Timeout for EACH individual Gemini model attempt.
-#
-# 30 seconds means:
-#
-# Model 1 -> maximum approximately 30 sec
-# Model 2 -> maximum approximately 30 sec
-# Model 3 -> maximum approximately 30 sec
-# Model 4 -> maximum approximately 30 sec
-#
-# The fallback does NOT wait indefinitely.
-#
 GEMINI_TIMEOUT_SECONDS = max(
     5,
     int(
@@ -128,12 +145,9 @@ GEMINI_TIMEOUT_SECONDS = max(
 )
 
 
-# ------------------------------------------------------------
-# CPU MEMORY / THREAD CONTROL
-# ------------------------------------------------------------
-
-# These do not change the RAG architecture.
-# They reduce unnecessary CPU-side resource pressure.
+# ============================================================
+# CPU / MEMORY CONTROL
+# ============================================================
 
 os.environ.setdefault(
     "TOKENIZERS_PARALLELISM",
@@ -152,6 +166,12 @@ os.environ.setdefault(
 
 os.environ.setdefault(
     "OPENBLAS_NUM_THREADS",
+    "1",
+)
+
+# Prevent unnecessary Hugging Face telemetry.
+os.environ.setdefault(
+    "HF_HUB_DISABLE_TELEMETRY",
     "1",
 )
 
@@ -206,12 +226,13 @@ def _cleanup_memory() -> None:
     gc.collect()
 
 
+# ============================================================
+# TORCH DIAGNOSTICS
+# ============================================================
+
 def _log_torch_environment() -> None:
     """
     Diagnostic information for deployment debugging.
-
-    This is deliberately called immediately before loading
-    the embedding model.
     """
 
     try:
@@ -238,6 +259,17 @@ def _log_torch_environment() -> None:
             _log(
                 ">>> TORCH: "
                 f"threads={torch.get_num_threads()}"
+            )
+
+        except Exception:
+            pass
+
+        try:
+
+            _log(
+                ">>> TORCH: "
+                f"interop_threads="
+                f"{torch.get_num_interop_threads()}"
             )
 
         except Exception:
@@ -356,9 +388,6 @@ def _page(
 ) -> int | None:
     """
     Extract page number from different Docling object forms.
-
-    Docling versions may expose page information differently,
-    so this helper intentionally checks several possibilities.
     """
 
     # --------------------------------------------------------
@@ -627,10 +656,17 @@ def _find_visual_labels(
 
     for label in labels:
 
+        label_text = str(
+            label.get(
+                "label",
+                "",
+            )
+        )
+
         _log(
             ">>> VISUAL LABEL: "
             f"page={label.get('page')} "
-            f"text={label.get('label')[:150]}"
+            f"text={label_text[:150]}"
         )
 
     return labels
@@ -668,11 +704,6 @@ def _selected_pictures(
             ">>> VISUAL: No visual pages detected "
             "from label provenance"
         )
-
-        # ----------------------------------------------------
-        # We deliberately do NOT send every picture to Gemini.
-        # That could become extremely expensive on a large PDF.
-        # ----------------------------------------------------
 
         return []
 
@@ -741,11 +772,6 @@ def _create_gemini_client(
     from google import genai
     from google.genai import types
 
-    # --------------------------------------------------------
-    # google-genai HttpOptions.timeout is specified in
-    # milliseconds.
-    # --------------------------------------------------------
-
     timeout_ms = (
         GEMINI_TIMEOUT_SECONDS
         * 1000
@@ -773,25 +799,6 @@ def _generate_with_fallback(
     contents: Any,
     stage: str,
 ) -> tuple[str, str]:
-
-    """
-    Try the configured Gemini models in order.
-
-    Model order:
-
-        1. gemini-3.5-flash-lite
-        2. gemini-3.1-flash-lite
-        3. gemini-3.5-flash
-        4. gemini-3.7-flash
-
-    Each model receives its own timeout.
-
-    Returns:
-
-        (response_text, model_name)
-
-    Raises RuntimeError if every model fails.
-    """
 
     last_error: Exception | None = None
 
@@ -846,10 +853,6 @@ def _generate_with_fallback(
 
             last_error = exc
 
-            error_text = str(
-                exc
-            )
-
             _log(
                 f">>> {stage}: FAILED "
                 f"model={model_name}"
@@ -857,12 +860,8 @@ def _generate_with_fallback(
 
             _log(
                 f">>> {stage}: Error = "
-                f"{error_text}"
+                f"{str(exc)}"
             )
-
-            # ------------------------------------------------
-            # Continue automatically to the next model.
-            # ------------------------------------------------
 
             if attempt < total_models:
 
@@ -927,14 +926,6 @@ Rules:
 
 Return concise factual prose.
 """
-
-    # --------------------------------------------------------
-    # model_name is retained in the function signature so the
-    # existing application remains compatible.
-    #
-    # The actual fallback sequence is controlled centrally by
-    # GEMINI_MODELS.
-    # --------------------------------------------------------
 
     return _generate_with_fallback(
         client,
@@ -1066,16 +1057,6 @@ def _visual_pass(
 
         except Exception as exc:
 
-            # ------------------------------------------------
-            # IMPORTANT:
-            #
-            # A failed visual must NOT stop the entire PDF
-            # processing pipeline.
-            #
-            # All Gemini fallback models have already been
-            # attempted inside _generate_with_fallback().
-            # ------------------------------------------------
-
             _log(
                 f">>> VISUAL ERROR: page "
                 f"{page}: {exc}"
@@ -1094,6 +1075,7 @@ def _visual_pass(
                     )
 
                     if callable(close_fn):
+
                         close_fn()
 
             except Exception:
@@ -1324,10 +1306,6 @@ def _canonical_elements(
                     "text": text,
                 }
             )
-
-    # --------------------------------------------------------
-    # SORT BY PAGE
-    # --------------------------------------------------------
 
     elements.sort(
         key=lambda item: (
@@ -1586,8 +1564,57 @@ def _chunk(
 # ============================================================
 # EMBEDDING MODEL
 # ============================================================
+#
+# IMPORTANT DEPLOYMENT CHANGE
+#
+# The model is cached for the lifetime of the Python process.
+#
+# Why?
+#
+# Previous behavior:
+#
+#     Upload PDF
+#       ↓
+#     Load BGE-M3
+#       ↓
+#     Create index
+#       ↓
+#     Delete BGE-M3
+#
+# Then every question:
+#
+#     Question
+#       ↓
+#     Load BGE-M3 AGAIN
+#       ↓
+#     Encode query
+#       ↓
+#     Delete BGE-M3
+#
+# That causes unnecessary model loading and memory pressure.
+#
+# New behavior:
+#
+#     First request
+#         ↓
+#     Load BGE-M3
+#         ↓
+#     Keep one model instance
+#
+#     Later requests
+#         ↓
+#     Reuse same model
+#
+# This does NOT change embeddings, FAISS, chunking or retrieval.
+# ============================================================
 
-def _load_embedding_model():
+
+@lru_cache(
+    maxsize=1
+)
+def _load_embedding_model_cached(
+    model_name: str,
+):
 
     _log(
         "================================================"
@@ -1599,21 +1626,17 @@ def _load_embedding_model():
 
     _log(
         f">>> EMBEDDING: Model = "
-        f"{EMBEDDING_MODEL_NAME}"
+        f"{model_name}"
     )
 
     _log(
         ">>> EMBEDDING: Device = CPU"
     )
 
-    # --------------------------------------------------------
-    # Torch diagnostic
-    # --------------------------------------------------------
-
     _log_torch_environment()
 
     # --------------------------------------------------------
-    # Import
+    # Import SentenceTransformer
     # --------------------------------------------------------
 
     _log(
@@ -1626,23 +1649,25 @@ def _load_embedding_model():
     )
 
     # --------------------------------------------------------
-    # Configure torch threads
+    # Torch configuration
     # --------------------------------------------------------
 
     try:
 
         import torch
 
+        num_threads = max(
+            1,
+            int(
+                os.getenv(
+                    "TORCH_NUM_THREADS",
+                    "1",
+                )
+            ),
+        )
+
         torch.set_num_threads(
-            max(
-                1,
-                int(
-                    os.getenv(
-                        "TORCH_NUM_THREADS",
-                        "1",
-                    )
-                ),
-            )
+            num_threads
         )
 
         try:
@@ -1654,6 +1679,11 @@ def _load_embedding_model():
         except Exception:
             pass
 
+        _log(
+            f">>> EMBEDDING: Torch threads "
+            f"configured = {num_threads}"
+        )
+
     except Exception as exc:
 
         _log(
@@ -1664,20 +1694,26 @@ def _load_embedding_model():
     _cleanup_memory()
 
     # --------------------------------------------------------
-    # IMPORTANT
-    #
-    # low_cpu_mem_usage reduces the peak memory required
-    # while constructing the model.
-    #
-    # This does NOT magically make BGE-M3 a small model.
-    # It simply prevents avoidable duplicate model copies
-    # during loading.
+    # Construct model
     # --------------------------------------------------------
 
     _log(
         ">>> EMBEDDING: Constructing "
         "SentenceTransformer"
     )
+
+    _log(
+        f">>> EMBEDDING: "
+        f"max_seq_length={EMBEDDING_MAX_SEQ_LENGTH}"
+    )
+
+    # --------------------------------------------------------
+    # low_cpu_mem_usage=True is retained because BGE-M3 is
+    # large and model construction can otherwise create a
+    # higher temporary CPU memory peak.
+    #
+    # We explicitly use CPU.
+    # --------------------------------------------------------
 
     model_kwargs = {
         "low_cpu_mem_usage": True,
@@ -1686,18 +1722,12 @@ def _load_embedding_model():
     try:
 
         model = SentenceTransformer(
-            EMBEDDING_MODEL_NAME,
+            model_name,
             device="cpu",
             model_kwargs=model_kwargs,
         )
 
     except TypeError as exc:
-
-        # ----------------------------------------------------
-        # Compatibility fallback for older versions of
-        # sentence-transformers that do not accept the
-        # low_cpu_mem_usage argument.
-        # ----------------------------------------------------
 
         _log(
             ">>> EMBEDDING: "
@@ -1712,15 +1742,136 @@ def _load_embedding_model():
         _cleanup_memory()
 
         model = SentenceTransformer(
-            EMBEDDING_MODEL_NAME,
+            model_name,
             device="cpu",
         )
+
+    # --------------------------------------------------------
+    # Limit sequence length after model construction.
+    #
+    # This reduces inference memory consumption.
+    # --------------------------------------------------------
+
+    try:
+
+        model.max_seq_length = (
+            EMBEDDING_MAX_SEQ_LENGTH
+        )
+
+        _log(
+            ">>> EMBEDDING: max_seq_length set to "
+            f"{model.max_seq_length}"
+        )
+
+    except Exception as exc:
+
+        _log(
+            ">>> EMBEDDING: Could not set "
+            f"max_seq_length: {exc}"
+        )
+
+    # --------------------------------------------------------
+    # Evaluation mode.
+    # --------------------------------------------------------
+
+    try:
+
+        model.eval()
+
+    except Exception as exc:
+
+        _log(
+            ">>> EMBEDDING: model.eval() "
+            f"failed: {exc}"
+        )
+
+    # --------------------------------------------------------
+    # Disable gradient tracking globally for inference.
+    # --------------------------------------------------------
+
+    try:
+
+        import torch
+
+        torch.set_grad_enabled(
+            False
+        )
+
+    except Exception:
+        pass
+
+    _cleanup_memory()
 
     _log(
         ">>> EMBEDDING: Model successfully loaded"
     )
 
     return model
+
+
+def _load_embedding_model():
+
+    return _load_embedding_model_cached(
+        EMBEDDING_MODEL_NAME
+    )
+
+
+# ============================================================
+# EMBEDDING ENCODE HELPER
+# ============================================================
+
+def _encode_texts(
+    model: Any,
+    texts: list[str],
+    batch_size: int,
+):
+
+    """
+    Encode text safely for CPU inference.
+
+    The important difference from the previous implementation
+    is that inference is explicitly performed without gradient
+    tracking.
+    """
+
+    if not texts:
+
+        raise ValueError(
+            "No text supplied for embedding."
+        )
+
+    try:
+
+        import torch
+
+        with torch.inference_mode():
+
+            vectors = model.encode(
+                texts,
+                batch_size=max(
+                    1,
+                    min(
+                        batch_size,
+                        len(texts),
+                    ),
+                ),
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+
+    except Exception as exc:
+
+        _log(
+            ">>> EMBEDDING: encode failed: "
+            f"{exc}"
+        )
+
+        raise
+
+    return vectors.astype(
+        "float32"
+    )
 
 
 # ============================================================
@@ -1811,17 +1962,10 @@ def _embed_index(
                 f"{start + 1}-{end}/{total}"
             )
 
-            vectors = model.encode(
+            vectors = _encode_texts(
+                model,
                 texts,
-                batch_size=min(
-                    batch_size,
-                    len(texts),
-                ),
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            ).astype(
-                "float32"
+                batch_size,
             )
 
             if index is None:
@@ -1890,14 +2034,21 @@ def _embed_index(
 
             del index
 
-        if model is not None:
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # Do NOT delete the cached model here.
+        #
+        # The model is intentionally retained for Q&A.
+        # ----------------------------------------------------
 
-            del model
+        model = None
 
         _cleanup_memory()
 
         _log(
-            ">>> EMBEDDING: Model/index released"
+            ">>> EMBEDDING: Index released; "
+            "cached embedding model retained"
         )
 
 
@@ -2178,6 +2329,9 @@ def build_or_load_document(
         "embedding_model":
             EMBEDDING_MODEL_NAME,
 
+        "embedding_max_seq_length":
+            EMBEDDING_MAX_SEQ_LENGTH,
+
         "index_type":
             "FAISS IndexFlatIP + normalized embeddings",
 
@@ -2302,19 +2456,18 @@ def _retrieve(
 
         return []
 
-    model = None
     query_vector = None
 
     try:
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # Retrieval MUST use the same embedding model that
-        # created the FAISS index.
+        # Retrieval MUST use exactly the same model that
+        # generated the stored FAISS vectors.
         # ----------------------------------------------------
 
-        retrieval_model = EMBEDDING_MODEL_NAME
+        retrieval_model_name = (
+            EMBEDDING_MODEL_NAME
+        )
 
         if manifest:
 
@@ -2324,34 +2477,36 @@ def _retrieve(
 
             if stored_model:
 
-                retrieval_model = stored_model
+                retrieval_model_name = (
+                    stored_model
+                )
 
-        if retrieval_model != EMBEDDING_MODEL_NAME:
+        if (
+            retrieval_model_name
+            != EMBEDDING_MODEL_NAME
+        ):
 
             _log(
                 ">>> RETRIEVAL: Manifest model differs "
                 f"from configured model. "
-                f"Using manifest model: {retrieval_model}"
+                f"Using manifest model: "
+                f"{retrieval_model_name}"
             )
 
-            # Temporarily load the exact model recorded
-            # in the manifest.
-            from sentence_transformers import (
-                SentenceTransformer,
-            )
+            # ------------------------------------------------
+            # This should normally never happen.
+            #
+            # Use cached loading for the exact stored model.
+            # ------------------------------------------------
 
-            model = SentenceTransformer(
-                retrieval_model,
-                device="cpu",
-                model_kwargs={
-                    "low_cpu_mem_usage": True,
-                },
+            model = _load_embedding_model_cached(
+                retrieval_model_name
             )
 
         else:
 
             _log(
-                ">>> RETRIEVAL: Loading "
+                ">>> RETRIEVAL: Reusing "
                 f"{EMBEDDING_MODEL_NAME}"
             )
 
@@ -2361,14 +2516,10 @@ def _retrieve(
             ">>> RETRIEVAL: Encoding query"
         )
 
-        query_vector = model.encode(
+        query_vector = _encode_texts(
+            model,
             [question],
             batch_size=1,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        ).astype(
-            "float32"
         )
 
         k = min(
@@ -2415,10 +2566,6 @@ def _retrieve(
         return results
 
     finally:
-
-        if model is not None:
-
-            del model
 
         del index
 
@@ -2486,10 +2633,6 @@ RETRIEVED PDF CONTEXT:
 """
 
     try:
-
-        # ----------------------------------------------------
-        # Same Gemini fallback logic as visual descriptions.
-        # ----------------------------------------------------
 
         answer, used_model = _generate_with_fallback(
             client,
@@ -2612,12 +2755,6 @@ def answer_question(
         )
 
     except Exception as exc:
-
-        # ----------------------------------------------------
-        # Controlled error for Streamlit.
-        # The actual fallback attempts and their errors have
-        # already been logged by _generate_with_fallback().
-        # ----------------------------------------------------
 
         _log(
             f">>> QA ERROR: {exc}"
