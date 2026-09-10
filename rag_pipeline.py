@@ -1,61 +1,114 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
-from typing import Callable, Any
-
-import numpy as np
+from typing import Any, Callable
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-INDEX_ROOT = Path(os.getenv("RAG_INDEX_ROOT", "storage"))
-INDEX_ROOT.mkdir(parents=True, exist_ok=True)
+INDEX_ROOT = Path(
+    os.getenv("RAG_INDEX_ROOT", "storage")
+)
+
+INDEX_ROOT.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 EMBEDDING_MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
     "BAAI/bge-m3",
 )
 
-EMBEDDING_BATCH_SIZE = int(
-    os.getenv("EMBEDDING_BATCH_SIZE", "4")
+EMBEDDING_BATCH_SIZE = max(
+    1,
+    int(
+        os.getenv(
+            "EMBEDDING_BATCH_SIZE",
+            "4",
+        )
+    ),
 )
 
-DEFAULT_TOP_K = int(
-    os.getenv("TOP_K", "5")
+DEFAULT_TOP_K = max(
+    1,
+    int(
+        os.getenv(
+            "TOP_K",
+            "5",
+        )
+    ),
 )
 
 CHUNK_TARGET = int(
-    os.getenv("CHUNK_TARGET", "1800")
+    os.getenv(
+        "CHUNK_TARGET",
+        "1800",
+    )
 )
 
 CHUNK_MAXIMUM = int(
-    os.getenv("CHUNK_MAXIMUM", "3200")
+    os.getenv(
+        "CHUNK_MAXIMUM",
+        "3200",
+    )
 )
 
 
-Progress = Callable[[float, str], None] | None
+Progress = Callable[
+    [float, str],
+    None,
+] | None
 
 
 # ============================================================
-# HELPERS
+# LOGGING / PROGRESS
 # ============================================================
+
+def _log(message: str) -> None:
+    """
+    Flush immediately so Streamlit Cloud logs show the
+    exact stage before a possible native crash / OOM kill.
+    """
+
+    print(
+        message,
+        flush=True,
+    )
+
 
 def _progress(
     cb: Progress,
     frac: float,
     message: str,
 ) -> None:
+
     if cb:
-        cb(float(frac), message)
+        cb(
+            float(frac),
+            message,
+        )
+
+    _log(
+        f"[RAG] {message}"
+    )
 
 
-def _doc_dir(document_id: str) -> Path:
+# ============================================================
+# STORAGE HELPERS
+# ============================================================
+
+def _doc_dir(
+    document_id: str,
+) -> Path:
+
     return INDEX_ROOT / document_id
 
 
@@ -63,16 +116,28 @@ def load_manifest(
     document_id: str,
 ) -> dict[str, Any] | None:
 
-    path = _doc_dir(document_id) / "manifest.json"
+    path = (
+        _doc_dir(document_id)
+        / "manifest.json"
+    )
 
     if not path.exists():
         return None
 
     try:
+
         return json.loads(
-            path.read_text(encoding="utf-8")
+            path.read_text(
+                encoding="utf-8"
+            )
         )
-    except Exception:
+
+    except Exception as exc:
+
+        _log(
+            f"[RAG] Manifest read failed: {exc}"
+        )
+
         return None
 
 
@@ -96,6 +161,15 @@ def _atomic_json(
     tmp.replace(path)
 
 
+def _cleanup_memory() -> None:
+
+    gc.collect()
+
+
+# ============================================================
+# DOCLING OBJECT HELPERS
+# ============================================================
+
 def _iter_collection(
     doc: Any,
     names: list[str],
@@ -109,17 +183,28 @@ def _iter_collection(
             None,
         )
 
-        if value is not None:
+        if value is None:
+            continue
 
-            try:
-                return list(value)
-            except TypeError:
-                pass
+        try:
+            return list(value)
+
+        except TypeError:
+            continue
+
+        except Exception as exc:
+
+            _log(
+                f"[RAG] Could not read "
+                f"Docling collection '{name}': {exc}"
+            )
 
     return []
 
 
-def _page(obj: Any) -> int | None:
+def _page(
+    obj: Any,
+) -> int | None:
 
     for name in (
         "page_no",
@@ -133,17 +218,21 @@ def _page(obj: Any) -> int | None:
             None,
         )
 
-        if value is not None:
+        if value is None:
+            continue
 
-            try:
-                return int(value)
-            except Exception:
-                return None
+        try:
+            return int(value)
+
+        except Exception:
+            continue
 
     return None
 
 
-def _text(obj: Any) -> str:
+def _text(
+    obj: Any,
+) -> str:
 
     for name in (
         "text",
@@ -157,7 +246,11 @@ def _text(obj: Any) -> str:
             None,
         )
 
-        if isinstance(value, str) and value.strip():
+        if (
+            isinstance(value, str)
+            and value.strip()
+        ):
+
             return value.strip()
 
     return ""
@@ -170,6 +263,10 @@ def _text(obj: Any) -> str:
 def _convert_pdf(
     pdf_path: Path,
 ):
+
+    _log(
+        ">>> STAGE 1: Importing Docling"
+    )
 
     from docling.document_converter import (
         DocumentConverter,
@@ -184,46 +281,64 @@ def _convert_pdf(
         InputFormat,
     )
 
+    _log(
+        ">>> STAGE 2: Creating PdfPipelineOptions"
+    )
+
     options = PdfPipelineOptions()
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # OCR is intentionally disabled.
-    #
-    # This prevents RapidOCR model downloads and permission
-    # problems on Streamlit Cloud.
+    # OCR MUST REMAIN DISABLED
     # --------------------------------------------------------
 
     options.do_ocr = False
 
     # --------------------------------------------------------
-    # Table structure extraction stays enabled.
-    # This is important for complex PDFs.
+    # TABLE STRUCTURE IS REQUIRED
     # --------------------------------------------------------
 
     options.do_table_structure = True
 
     # --------------------------------------------------------
-    # Extract pictures so charts/figures can be passed
-    # through the Gemini visual-description stage.
+    # PICTURE EXTRACTION
     # --------------------------------------------------------
 
     options.generate_picture_images = True
 
+    _log(
+        ">>> STAGE 3: Creating DocumentConverter"
+    )
+
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_options=options
-            )
+            InputFormat.PDF:
+                PdfFormatOption(
+                    pipeline_options=options
+                )
         }
+    )
+
+    _log(
+        ">>> STAGE 4: Starting Docling conversion"
     )
 
     result = converter.convert(
         str(pdf_path)
     )
 
+    _log(
+        ">>> STAGE 5: Docling conversion COMPLETE"
+    )
+
+    # Release converter immediately.
     del converter
-    gc.collect()
+    del options
+
+    _cleanup_memory()
+
+    _log(
+        ">>> STAGE 6: Docling converter released"
+    )
 
     return result
 
@@ -236,7 +351,13 @@ def _find_visual_labels(
     doc: Any,
 ) -> list[dict[str, Any]]:
 
-    labels: list[dict[str, Any]] = []
+    _log(
+        ">>> VISUAL: Searching for chart/figure labels"
+    )
+
+    labels: list[
+        dict[str, Any]
+    ] = []
 
     items = _iter_collection(
         doc,
@@ -251,6 +372,9 @@ def _find_visual_labels(
 
         text = _text(item)
 
+        if not text:
+            continue
+
         if re.search(
             r"\b(chart|figure|fig\.?)\b",
             text,
@@ -264,13 +388,20 @@ def _find_visual_labels(
                 }
             )
 
+    _log(
+        f">>> VISUAL: Found "
+        f"{len(labels)} visual labels"
+    )
+
     return labels
 
 
 def _selected_pictures(
     doc: Any,
     labels: list[dict[str, Any]],
-) -> list[tuple[Any, int | None]]:
+) -> list[
+    tuple[Any, int | None]
+]:
 
     pictures = _iter_collection(
         doc,
@@ -287,13 +418,20 @@ def _selected_pictures(
     }
 
     if not pages:
+
+        _log(
+            ">>> VISUAL: No visual pages detected"
+        )
+
         return []
 
     selected = []
 
     for picture in pictures:
 
-        page = _page(picture)
+        page = _page(
+            picture
+        )
 
         if page in pages:
 
@@ -303,6 +441,11 @@ def _selected_pictures(
                     page,
                 )
             )
+
+    _log(
+        f">>> VISUAL: Selected "
+        f"{len(selected)} pictures"
+    )
 
     return selected
 
@@ -317,7 +460,9 @@ def _picture_image(
         "get_image",
     ):
 
-        return picture.get_image(doc)
+        return picture.get_image(
+            doc
+        )
 
     return getattr(
         picture,
@@ -327,21 +472,30 @@ def _picture_image(
 
 
 # ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+def _create_gemini_client(
+    api_key: str,
+):
+
+    from google import genai
+
+    return genai.Client(
+        api_key=api_key
+    )
+
+
+# ============================================================
 # GEMINI VISUAL DESCRIPTION
 # ============================================================
 
 def _gemini_describe(
+    client: Any,
     image: Any,
-    api_key: str,
     model_name: str,
     page: int | None,
 ) -> str:
-
-    from google import genai
-
-    client = genai.Client(
-        api_key=api_key
-    )
 
     prompt = f"""
 Describe ONLY the visible information in this
@@ -398,7 +552,17 @@ def _visual_pass(
 ) -> list[dict[str, Any]]:
 
     if not api_key:
+
+        _log(
+            ">>> VISUAL: Gemini key unavailable; "
+            "visual descriptions skipped"
+        )
+
         return []
+
+    _log(
+        ">>> VISUAL: Starting visual pass"
+    )
 
     labels = _find_visual_labels(
         doc
@@ -409,11 +573,24 @@ def _visual_pass(
         labels,
     )
 
+    if not selected:
+
+        _progress(
+            cb,
+            0.52,
+            "No chart/figure visuals selected.",
+        )
+
+        return []
+
+    client = _create_gemini_client(
+        api_key
+    )
+
     descriptions = []
 
-    total = max(
-        1,
-        len(selected),
+    total = len(
+        selected
     )
 
     for i, (
@@ -424,12 +601,21 @@ def _visual_pass(
         start=1,
     ):
 
+        _log(
+            f">>> VISUAL: Processing visual "
+            f"{i}/{total}, page={page}"
+        )
+
         _progress(
             cb,
             0.35
             + 0.17
-            * ((i - 1) / total),
-            f"Describing visual {i}/{total}...",
+            * (
+                (i - 1)
+                / max(1, total)
+            ),
+            f"Describing visual "
+            f"{i}/{total}...",
         )
 
         image = None
@@ -441,33 +627,42 @@ def _visual_pass(
                 doc,
             )
 
-            if image is not None:
+            if image is None:
 
-                text = _gemini_describe(
-                    image,
-                    api_key,
-                    model_name,
-                    page,
+                _log(
+                    f">>> VISUAL: No image "
+                    f"available for page {page}"
                 )
 
-                if text:
+                continue
 
-                    descriptions.append(
-                        {
-                            "kind": "visual",
-                            "page": page,
-                            "text": text,
-                        }
-                    )
+            text = _gemini_describe(
+                client,
+                image,
+                model_name,
+                page,
+            )
+
+            _log(
+                f">>> VISUAL: Gemini description "
+                f"complete for page {page}"
+            )
+
+            if text:
+
+                descriptions.append(
+                    {
+                        "kind": "visual",
+                        "page": page,
+                        "text": text,
+                    }
+                )
 
         except Exception as exc:
 
-            # A single visual should not destroy
-            # the complete PDF processing pipeline.
-
-            print(
-                f"Visual description failed "
-                f"on page {page}: {exc}"
+            _log(
+                f">>> VISUAL ERROR: page "
+                f"{page}: {exc}"
             )
 
         finally:
@@ -481,13 +676,20 @@ def _visual_pass(
                 pass
 
             del image
-            gc.collect()
+
+            _cleanup_memory()
+
+    del client
 
     _progress(
         cb,
         0.52,
         f"Visual pass complete: "
         f"{len(descriptions)} descriptions.",
+    )
+
+    _log(
+        ">>> VISUAL: Visual pass finished"
     )
 
     return descriptions
@@ -508,16 +710,25 @@ def _clean_text(
     ]
 
     if len(lines) < 6:
-        return "\n".join(lines)
 
-    counts: dict[str, int] = {}
+        return "\n".join(
+            lines
+        )
+
+    counts: dict[
+        str,
+        int,
+    ] = {}
 
     for line in lines:
 
         if len(line) <= 180:
 
             counts[line] = (
-                counts.get(line, 0)
+                counts.get(
+                    line,
+                    0,
+                )
                 + 1
             )
 
@@ -544,7 +755,6 @@ def _table_text(
     doc: Any,
 ) -> str:
 
-    # Current Docling API
     fn = getattr(
         table,
         "export_to_markdown",
@@ -555,23 +765,40 @@ def _table_text(
 
         try:
 
-            return fn(
+            value = fn(
                 doc=doc
             )
+
+            if value:
+                return str(value)
 
         except TypeError:
 
             try:
 
-                return fn(doc)
+                value = fn(
+                    doc
+                )
 
-            except Exception:
-                pass
+                if value:
+                    return str(
+                        value
+                    )
 
-        except Exception:
-            pass
+            except Exception as exc:
 
-    # Compatibility fallback
+                _log(
+                    f"[RAG] Table markdown "
+                    f"fallback failed: {exc}"
+                )
+
+        except Exception as exc:
+
+            _log(
+                f"[RAG] Table markdown "
+                f"export failed: {exc}"
+            )
+
     fn = getattr(
         table,
         "to_markdown",
@@ -581,11 +808,21 @@ def _table_text(
     if callable(fn):
 
         try:
-            return fn()
-        except Exception:
-            pass
 
-    return str(table)
+            value = fn()
+
+            if value:
+                return str(value)
+
+        except Exception as exc:
+
+            _log(
+                f"[RAG] to_markdown failed: {exc}"
+            )
+
+    return str(
+        table
+    )
 
 
 # ============================================================
@@ -594,7 +831,9 @@ def _table_text(
 
 def _canonical_elements(
     doc: Any,
-) -> list[dict[str, Any]]:
+) -> list[
+    dict[str, Any]
+]:
 
     elements = []
 
@@ -651,7 +890,58 @@ def _canonical_elements(
                 }
             )
 
+    # --------------------------------------------------------
+    # SORT BY PAGE
+    #
+    # This is important because we later merge visual
+    # descriptions into the same page context.
+    # --------------------------------------------------------
+
+    elements.sort(
+        key=lambda item: (
+            item.get("page")
+            if item.get("page") is not None
+            else 10**9
+        )
+    )
+
+    _log(
+        f">>> CANONICAL: "
+        f"{len(elements)} text/table elements"
+    )
+
     return elements
+
+
+# ============================================================
+# MERGE VISUALS INTO PAGE ORDER
+# ============================================================
+
+def _merge_visuals(
+    elements: list[
+        dict[str, Any]
+    ],
+    visual_descriptions: list[
+        dict[str, Any]
+    ],
+) -> list[
+    dict[str, Any]
+]:
+
+    combined = (
+        list(elements)
+        + list(visual_descriptions)
+    )
+
+    combined.sort(
+        key=lambda item: (
+            item.get("page")
+            if item.get("page") is not None
+            else 10**9
+        )
+    )
+
+    return combined
 
 
 # ============================================================
@@ -659,45 +949,98 @@ def _canonical_elements(
 # ============================================================
 
 def _chunk(
-    elements: list[dict[str, Any]],
+    elements: list[
+        dict[str, Any]
+    ],
     target: int = CHUNK_TARGET,
     maximum: int = CHUNK_MAXIMUM,
-) -> list[dict[str, Any]]:
+) -> list[
+    dict[str, Any]
+]:
 
     result = []
 
     buffer = []
+
     length = 0
+
+    chunk_id = 0
 
     def flush():
 
         nonlocal buffer
         nonlocal length
+        nonlocal chunk_id
 
-        if buffer:
+        if not buffer:
+            return
 
-            result.append(
-                {
-                    "kind": "text",
-                    "page": buffer[0].get(
-                        "page"
-                    ),
-                    "text": "\n\n".join(
-                        x["text"]
-                        for x in buffer
-                    ).strip(),
-                }
-            )
+        text = "\n\n".join(
+            item["text"]
+            for item in buffer
+        ).strip()
+
+        if not text:
+            buffer = []
+            length = 0
+            return
+
+        pages = [
+            item.get("page")
+            for item in buffer
+            if item.get("page")
+            is not None
+        ]
+
+        page_start = (
+            min(pages)
+            if pages
+            else None
+        )
+
+        page_end = (
+            max(pages)
+            if pages
+            else None
+        )
+
+        element_types = [
+            item.get("kind")
+            for item in buffer
+        ]
+
+        result.append(
+            {
+                "chunk_id": chunk_id,
+                "page_start": page_start,
+                "page_end": page_end,
+                "kind": "text",
+                "text": text,
+                "element_types":
+                    element_types,
+                "has_table":
+                    "table"
+                    in element_types,
+                "has_visual":
+                    "visual"
+                    in element_types,
+            }
+        )
+
+        chunk_id += 1
 
         buffer = []
         length = 0
 
     for element in elements:
 
-        text = element.get(
-            "text",
-            "",
-        ).strip()
+        text = (
+            element.get(
+                "text",
+                "",
+            )
+            .strip()
+        )
 
         kind = element.get(
             "kind"
@@ -719,13 +1062,27 @@ def _chunk(
 
             result.append(
                 {
+                    "chunk_id": chunk_id,
+                    "page_start":
+                        element.get(
+                            "page"
+                        ),
+                    "page_end":
+                        element.get(
+                            "page"
+                        ),
                     "kind": kind,
-                    "page": element.get(
-                        "page"
-                    ),
                     "text": text,
+                    "element_types":
+                        [kind],
+                    "has_table":
+                        kind == "table",
+                    "has_visual":
+                        kind == "visual",
                 }
             )
+
+            chunk_id += 1
 
             continue
 
@@ -733,12 +1090,15 @@ def _chunk(
         # NORMAL TEXT
         # ----------------------------------------------------
 
-        if (
-            buffer
-            and length
+        projected = (
+            length
             + len(text)
             + 2
-            > maximum
+        )
+
+        if (
+            buffer
+            and projected > maximum
         ):
 
             flush()
@@ -753,9 +1113,15 @@ def _chunk(
         )
 
         if length >= target:
+
             flush()
 
     flush()
+
+    _log(
+        f">>> CHUNKING: Created "
+        f"{len(result)} chunks"
+    )
 
     return result
 
@@ -766,14 +1132,21 @@ def _chunk(
 
 def _load_embedding_model():
 
+    _log(
+        ">>> EMBEDDING: Loading BGE-M3 on CPU"
+    )
+
     from sentence_transformers import (
         SentenceTransformer,
     )
 
-    # Explicit CPU prevents accidental GPU/CUDA usage.
     model = SentenceTransformer(
         EMBEDDING_MODEL_NAME,
         device="cpu",
+    )
+
+    _log(
+        ">>> EMBEDDING: BGE-M3 loaded"
     )
 
     return model
@@ -784,38 +1157,54 @@ def _load_embedding_model():
 # ============================================================
 
 def _embed_index(
-    chunks: list[dict[str, Any]],
+    chunks: list[
+        dict[str, Any]
+    ],
     index_path: Path,
     cb: Progress,
     batch_size: int = EMBEDDING_BATCH_SIZE,
 ) -> None:
 
-    import faiss
-
     if not chunks:
+
         raise RuntimeError(
             "No chunks available for embedding."
         )
 
-    _progress(
-        cb,
-        0.61,
-        "Loading embedding model...",
+    _log(
+        f">>> EMBEDDING: About to load BGE-M3"
+        f" for {len(chunks)} chunks"
     )
 
-    model = _load_embedding_model()
+    import faiss
 
-    _progress(
-        cb,
-        0.64,
-        "Embedding model loaded.",
-    )
-
+    model = None
     index = None
 
-    total = len(chunks)
-
     try:
+
+        _progress(
+            cb,
+            0.61,
+            "Loading embedding model...",
+        )
+
+        model = _load_embedding_model()
+
+        _progress(
+            cb,
+            0.64,
+            "Embedding model loaded.",
+        )
+
+        total = len(
+            chunks
+        )
+
+        _log(
+            f">>> EMBEDDING: Starting batches "
+            f"batch_size={batch_size}"
+        )
 
         for start in range(
             0,
@@ -823,15 +1212,24 @@ def _embed_index(
             batch_size,
         ):
 
+            end = min(
+                start + batch_size,
+                total,
+            )
+
             batch = chunks[
-                start:
-                start + batch_size
+                start:end
             ]
 
             texts = [
                 item["text"]
                 for item in batch
             ]
+
+            _log(
+                f">>> EMBEDDING: Encoding "
+                f"{start + 1}-{end}/{total}"
+            )
 
             vectors = model.encode(
                 texts,
@@ -852,18 +1250,23 @@ def _embed_index(
                     vectors.shape[1]
                 )
 
+                _log(
+                    f">>> FAISS: Created "
+                    f"IndexFlatIP dimension="
+                    f"{vectors.shape[1]}"
+                )
+
             index.add(
                 vectors
             )
 
             del vectors
             del texts
-            gc.collect()
+            del batch
 
-            completed = (
-                start
-                + len(batch)
-            )
+            _cleanup_memory()
+
+            completed = end
 
             _progress(
                 cb,
@@ -883,16 +1286,33 @@ def _embed_index(
                 "FAISS index was not created."
             )
 
+        _log(
+            f">>> FAISS: Writing index "
+            f"with {index.ntotal} vectors"
+        )
+
         faiss.write_index(
             index,
             str(index_path),
         )
 
+        _log(
+            ">>> FAISS: Index successfully saved"
+        )
+
     finally:
 
-        del index
-        del model
-        gc.collect()
+        if index is not None:
+            del index
+
+        if model is not None:
+            del model
+
+        _cleanup_memory()
+
+        _log(
+            ">>> EMBEDDING: Model/index released"
+        )
 
 
 # ============================================================
@@ -908,17 +1328,35 @@ def build_or_load_document(
     progress_callback: Progress = None,
 ):
 
+    _log(
+        "================================================"
+    )
+
+    _log(
+        f">>> PIPELINE: Starting document "
+        f"{source_name}"
+    )
+
+    _log(
+        f">>> PIPELINE: Document ID = "
+        f"{document_id}"
+    )
+
     existing = load_manifest(
         document_id
     )
 
+    doc_dir = _doc_dir(
+        document_id
+    )
+
     index_path = (
-        _doc_dir(document_id)
+        doc_dir
         / "index.faiss"
     )
 
     chunks_path = (
-        _doc_dir(document_id)
+        doc_dir
         / "chunks.json"
     )
 
@@ -938,15 +1376,15 @@ def build_or_load_document(
             "Existing processed index loaded.",
         )
 
+        _log(
+            ">>> PIPELINE: Existing index reused"
+        )
+
         return existing
 
     # --------------------------------------------------------
-    # CREATE DOCUMENT DIRECTORY
+    # DIRECTORY
     # --------------------------------------------------------
-
-    doc_dir = _doc_dir(
-        document_id
-    )
 
     doc_dir.mkdir(
         parents=True,
@@ -962,6 +1400,11 @@ def build_or_load_document(
         pdf_bytes
     )
 
+    _log(
+        f">>> PIPELINE: PDF written to "
+        f"{pdf_path}"
+    )
+
     # --------------------------------------------------------
     # DOCLING
     # --------------------------------------------------------
@@ -972,11 +1415,29 @@ def build_or_load_document(
         "Converting PDF with Docling...",
     )
 
+    _log(
+        ">>> PIPELINE: Calling Docling"
+    )
+
     result = _convert_pdf(
         pdf_path
     )
 
+    _log(
+        ">>> PIPELINE: Docling returned result"
+    )
+
+    if result is None:
+
+        raise RuntimeError(
+            "Docling returned no conversion result."
+        )
+
     doc = result.document
+
+    _log(
+        ">>> PIPELINE: Document object obtained"
+    )
 
     try:
 
@@ -998,9 +1459,18 @@ def build_or_load_document(
         "Docling extraction complete.",
     )
 
+    _log(
+        f">>> PIPELINE: Docling extraction "
+        f"complete; pages={pages}"
+    )
+
     # --------------------------------------------------------
-    # VISUAL DESCRIPTION
+    # VISUALS
     # --------------------------------------------------------
+
+    _log(
+        ">>> PIPELINE: Starting visual stage"
+    )
 
     visual_descriptions = _visual_pass(
         doc,
@@ -1009,8 +1479,14 @@ def build_or_load_document(
         progress_callback,
     )
 
+    _log(
+        f">>> PIPELINE: Visual stage complete; "
+        f"descriptions="
+        f"{len(visual_descriptions)}"
+    )
+
     # --------------------------------------------------------
-    # CANONICAL STRUCTURE
+    # CANONICAL
     # --------------------------------------------------------
 
     _progress(
@@ -1023,8 +1499,14 @@ def build_or_load_document(
         doc
     )
 
-    elements.extend(
-        visual_descriptions
+    elements = _merge_visuals(
+        elements,
+        visual_descriptions,
+    )
+
+    _log(
+        f">>> CANONICAL: Combined elements = "
+        f"{len(elements)}"
     )
 
     # --------------------------------------------------------
@@ -1033,7 +1515,12 @@ def build_or_load_document(
 
     del result
     del doc
-    gc.collect()
+
+    _cleanup_memory()
+
+    _log(
+        ">>> PIPELINE: Docling objects released"
+    )
 
     # --------------------------------------------------------
     # CHUNKING
@@ -1044,7 +1531,8 @@ def build_or_load_document(
     )
 
     del elements
-    gc.collect()
+
+    _cleanup_memory()
 
     if not chunks:
 
@@ -1052,6 +1540,11 @@ def build_or_load_document(
             "No usable text, table, "
             "or visual content was extracted."
         )
+
+    _log(
+        f">>> PIPELINE: Chunking complete; "
+        f"chunks={len(chunks)}"
+    )
 
     _atomic_json(
         chunks_path,
@@ -1065,8 +1558,12 @@ def build_or_load_document(
     )
 
     # --------------------------------------------------------
-    # EMBEDDING + FAISS
+    # EMBEDDINGS
     # --------------------------------------------------------
+
+    _log(
+        ">>> PIPELINE: About to start embedding"
+    )
 
     _embed_index(
         chunks,
@@ -1080,10 +1577,17 @@ def build_or_load_document(
     # --------------------------------------------------------
 
     manifest = {
-        "document_id": document_id,
-        "source_name": source_name,
-        "pages": pages,
-        "num_chunks": len(chunks),
+        "document_id":
+            document_id,
+
+        "source_name":
+            source_name,
+
+        "pages":
+            pages,
+
+        "num_chunks":
+            len(chunks),
 
         "embedding_model":
             EMBEDDING_MODEL_NAME,
@@ -1097,31 +1601,49 @@ def build_or_load_document(
             f"tables and visuals atomic",
 
         "visual_descriptions":
-            len(visual_descriptions),
+            len(
+                visual_descriptions
+            ),
 
-        "ocr": False,
+        "ocr":
+            False,
 
-        "table_structure": True,
+        "table_structure":
+            True,
 
-        "picture_images": True,
+        "picture_images":
+            True,
 
-        "notebook_aligned": True,
+        "notebook_aligned":
+            True,
+
+        "embedding_batch_size":
+            EMBEDDING_BATCH_SIZE,
     }
 
     _atomic_json(
-        doc_dir / "manifest.json",
+        doc_dir
+        / "manifest.json",
         manifest,
     )
 
     del chunks
     del visual_descriptions
 
-    gc.collect()
+    _cleanup_memory()
 
     _progress(
         progress_callback,
         1.0,
         "Index saved. Ready for Q&A.",
+    )
+
+    _log(
+        ">>> PIPELINE: COMPLETE"
+    )
+
+    _log(
+        "================================================"
     )
 
     return manifest
@@ -1154,11 +1676,13 @@ def _retrieve(
     )
 
     if not chunks_path.exists():
+
         raise FileNotFoundError(
             "Chunk file not found."
         )
 
     if not index_path.exists():
+
         raise FileNotFoundError(
             "FAISS index not found."
         )
@@ -1174,11 +1698,28 @@ def _retrieve(
     )
 
     if index.ntotal == 0:
+
+        del index
+        del chunks
+
+        _cleanup_memory()
+
         return []
 
-    model = _load_embedding_model()
+    model = None
+    query_vector = None
 
     try:
+
+        _log(
+            ">>> RETRIEVAL: Loading BGE-M3"
+        )
+
+        model = _load_embedding_model()
+
+        _log(
+            ">>> RETRIEVAL: Encoding query"
+        )
 
         query_vector = model.encode(
             [question],
@@ -1212,7 +1753,9 @@ def _retrieve(
             ):
 
                 item = dict(
-                    chunks[int(idx)]
+                    chunks[
+                        int(idx)
+                    ]
                 )
 
                 item["score"] = float(
@@ -1223,17 +1766,26 @@ def _retrieve(
                     item
                 )
 
+        _log(
+            f">>> RETRIEVAL: "
+            f"{len(results)} results"
+        )
+
         return results
 
     finally:
 
-        del model
+        if model is not None:
+            del model
+
         del index
 
-        if "query_vector" in locals():
+        if query_vector is not None:
             del query_vector
 
-        gc.collect()
+        del chunks
+
+        _cleanup_memory()
 
 
 # ============================================================
@@ -1247,10 +1799,14 @@ def _answer(
     model_name: str,
 ) -> str:
 
-    from google import genai
+    if not api_key:
 
-    client = genai.Client(
-        api_key=api_key
+        raise ValueError(
+            "Gemini API key is required."
+        )
+
+    client = _create_gemini_client(
+        api_key
     )
 
     prompt = f"""
@@ -1291,6 +1847,8 @@ RETRIEVED PDF CONTEXT:
         contents=prompt,
     )
 
+    del client
+
     return (
         response.text or ""
     ).strip()
@@ -1324,6 +1882,10 @@ def answer_question(
             "Question cannot be empty."
         )
 
+    _log(
+        f">>> QA: Question = {question}"
+    )
+
     results = _retrieve(
         document_id,
         question,
@@ -1345,7 +1907,9 @@ def answer_question(
 
         context_parts.append(
             f"""
-[Page {result.get('page', '?')}
+[Pages {result.get('page_start', result.get('page', '?'))}
+-
+{result.get('page_end', result.get('page', '?'))}
  | {result.get('kind')}
  | similarity {result['score']:.4f}]
 
@@ -1355,7 +1919,9 @@ def answer_question(
 
     context = (
         "\n\n---\n\n"
-        .join(context_parts)
+        .join(
+            context_parts
+        )
     )
 
     answer = _answer(
@@ -1367,8 +1933,17 @@ def answer_question(
 
     sources = [
         {
-            "page":
-                result.get("page"),
+            "page_start":
+                result.get(
+                    "page_start",
+                    result.get("page"),
+                ),
+
+            "page_end":
+                result.get(
+                    "page_end",
+                    result.get("page"),
+                ),
 
             "kind":
                 result.get("kind"),
@@ -1381,9 +1956,17 @@ def answer_question(
     ]
 
     del results
-    gc.collect()
+
+    _cleanup_memory()
+
+    _log(
+        ">>> QA: Answer generated"
+    )
 
     return {
-        "answer": answer,
-        "sources": sources,
+        "answer":
+            answer,
+
+        "sources":
+            sources,
     }
