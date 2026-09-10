@@ -60,19 +60,32 @@ def _text(obj):
     return ""
 
 def _convert_pdf(pdf_path):
+    import os
+    from pathlib import Path
+
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.datamodel.base_models import InputFormat
 
-    opts = PdfPipelineOptions()
+    # Streamlit Cloud allows writing to the app/user home directory.
+    artifacts_path = Path.home() / ".cache" / "docling" / "models"
+    artifacts_path.mkdir(parents=True, exist_ok=True)
+
+    opts = PdfPipelineOptions(
+        artifacts_path=str(artifacts_path)
+    )
+
     opts.do_table_structure = True
     opts.generate_picture_images = True
-   
+
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=opts)
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=opts
+            )
         }
     )
+
     return converter.convert(pdf_path)
 
 def _find_visual_labels(doc):
