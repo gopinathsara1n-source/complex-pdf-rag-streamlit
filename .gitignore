@@ -1,7 +1,0 @@
-__pycache__/
-*.pyc
-.env
-.streamlit/secrets.toml
-data/cache/*
-data/example/*
-!.gitkeep
