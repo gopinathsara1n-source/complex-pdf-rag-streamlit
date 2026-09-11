@@ -254,6 +254,30 @@ for col, (label, value) in zip(cols, stat_items):
         unsafe_allow_html=True,
     )
 
+with st.expander("🔍 Debug: search the raw chunk text (no AI involved)"):
+    st.caption(
+        "If the assistant keeps saying 'not available', check here first — this does a plain "
+        "keyword search across every chunk, so you can confirm whether the document actually "
+        "contains what you're looking for before assuming retrieval is broken."
+    )
+    debug_query = st.text_input("Keyword to search for", key="debug_keyword")
+    if debug_query:
+        hits = [
+            c for c in doc_index.chunks
+            if debug_query.lower() in c["content"].lower()
+        ]
+        st.write(f"**{len(hits)} chunk(s) contain \"{debug_query}\"**")
+        for c in hits[:15]:
+            st.markdown(
+                f"— page {c['page_start']}–{c['page_end']}"
+                + (f" · _{c.get('section')}_" if c.get("section") else "")
+            )
+            st.caption(c["content"][:500] + ("…" if len(c["content"]) > 500 else ""))
+            st.markdown("---")
+        if not hits:
+            st.info("No chunk contains that exact text — the document likely doesn't cover it, "
+                     "or it uses different wording. Try a shorter/simpler keyword.")
+
 st.write("")
 
 # ---- render chat history ----
