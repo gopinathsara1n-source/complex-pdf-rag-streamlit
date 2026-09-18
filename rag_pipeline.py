@@ -1,25 +1,3 @@
-"""
-rag_pipeline.py
-================
-Core Retrieval-Augmented-Generation pipeline used by the Streamlit app.
-
-This is a Streamlit-friendly refactor of the original Colab notebook
-("final_RAG_gemini_embedding.ipynb"). The logic (Docling ingestion ->
-Gemini vision descriptions -> canonical document -> structure-aware
-chunking -> Gemini Embedding -> FAISS -> Gemini answer generation) is
-preserved, but:
-
-  * Google Colab / Google Drive mounting is removed.
-  * All intermediate artifacts live in a per-session temp folder
-    instead of Google Drive.
-  * Every long-running stage accepts an optional ``progress_cb``
-    callback ``(fraction: float, message: str) -> None`` so the UI
-    can show live progress instead of printing to stdout.
-  * The embedding step no longer assumes a multi-day quota budget --
-    it embeds everything in one run with safe rate limiting, since a
-    Streamlit session is short-lived.
-"""
-
 from __future__ import annotations
 
 import json
@@ -99,22 +77,6 @@ VISION_DELAY_BETWEEN_REQUESTS = 1.0
 # ------------------------------------------------------------------
 # STREAMLIT CLOUD / RAPIDOCR WRITABLE MODEL DIRECTORY
 # ------------------------------------------------------------------
-#
-# RapidOCR normally tries to save downloaded model weights inside
-# site-packages/rapidocr/models/.
-#
-# Streamlit Community Cloud's installed package directory is not
-# writable, which caused:
-#
-# PermissionError:
-# /home/adminuser/venv/lib/python3.12/site-packages/
-# rapidocr/models/PP-OCRv6_det_small.pth
-#
-# Use /tmp instead. /tmp is writable during the Streamlit session.
-#
-# This does NOT change the RAG architecture or OCR engine.
-# It only changes where RapidOCR stores downloaded model files.
-# ------------------------------------------------------------------
 
 RAPIDOCR_MODEL_DIR = Path("/tmp/documind_rapidocr")
 
@@ -141,26 +103,9 @@ def _prepare_rapidocr_paths() -> dict:
 # ------------------------------------------------------------------
 
 def build_converter(do_ocr: bool = False) -> DocumentConverter:
-    """
-    Build the Docling PDF converter.
-
-    The original pipeline behavior is preserved:
-      - table structure extraction enabled
-      - picture extraction enabled
-      - picture descriptions handled separately by Gemini
-      - OCR remains disabled by default
-
-    RapidOCR is explicitly configured with writable model paths so
-    that if Docling initializes its OCR model on Streamlit Cloud,
-    RapidOCR does not attempt to write into site-packages.
-    """
 
     rapidocr_paths = _prepare_rapidocr_paths()
 
-    # Explicit RapidOCR configuration.
-    #
-    # The backend remains Torch, matching the backend shown in the
-    # Streamlit deployment logs.
     rapidocr_options = RapidOcrOptions(
         backend="torch",
         det_model_path=str(rapidocr_paths["det"]),
@@ -174,11 +119,8 @@ def build_converter(do_ocr: bool = False) -> DocumentConverter:
     pipeline_options.do_table_structure = True
     pipeline_options.generate_picture_images = True
     pipeline_options.do_picture_description = False
-
-    # Preserve the original default.
     pipeline_options.do_ocr = do_ocr
 
-    # Explicitly provide the RapidOCR configuration.
     pipeline_options.ocr_options = rapidocr_options
 
     return DocumentConverter(
@@ -191,7 +133,7 @@ def build_converter(do_ocr: bool = False) -> DocumentConverter:
 
 
 # ------------------------------------------------------------------
-# HELPERS (verbatim logic from Stage 2 of the notebook)
+# HELPERS
 # ------------------------------------------------------------------
 
 def get_attr_or_key(obj, name, default=None):
@@ -420,8 +362,6 @@ def ingest_pdf(
 
     docling_data = doc.export_to_dict()
 
-    # ---- extract every picture to PNG on disk ----
-
     picture_manifest = []
 
     total_pics = max(
@@ -549,8 +489,6 @@ def ingest_pdf(
             f"Extracting images ({idx}/{total_pics})...",
         )
 
-    # ---- page text lookup, used to give each picture some nearby context ----
-
     page_text = defaultdict(list)
 
     for item, _level in doc.iterate_items():
@@ -614,8 +552,6 @@ def ingest_pdf(
                 "nearby_text": cleaned_context,
             }
         )
-
-    # ---- filter to visuals big enough to matter ----
 
     visual_manifest = []
 
@@ -1702,8 +1638,6 @@ def chunk_elements(
                 )
 
     flush_chunk()
-
-    # merge very small chunks into previous one
 
     clean_chunks = []
 
